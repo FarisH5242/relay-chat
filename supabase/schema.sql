@@ -10,3 +10,16 @@ alter table public.conversation_members enable row level security;
 alter table public.messages enable row level security;
 create policy "Profiles visible to signed in users" on public.profiles for select to authenticated using(true);
 create policy "Users create own profile" on public.profiles for insert to authenticated with check(auth.uid() = id);
+
+-- Automatically provision profiles for signups, including email-confirmation flows.
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = '' as $$
+begin
+  insert into public.profiles (id,username)
+  values (new.id, lower(new.raw_user_meta_data ->> 'username'));
+  return new;
+end;
+$$;
+create trigger on_auth_user_created
+after insert on auth.users
+for each row execute procedure public.handle_new_user();
