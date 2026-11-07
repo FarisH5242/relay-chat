@@ -1,0 +1,22 @@
+name: Build check
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [web, api]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install
+        working-directory: ${{ matrix.app }}
+        run: npm install
+      - name: Compile
+        working-directory: ${{ matrix.app }}
+        run: npm run build
