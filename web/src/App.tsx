@@ -16,11 +16,9 @@ function Auth({onAuth}:{onAuth:(session:Session)=>void}) {
       if (mode === "signup") {
         const name = username.trim().toLowerCase();
         if (!/^[a-z0-9_]{3,24}$/.test(name)) throw Error("Username must be 3–24 lowercase letters, numbers or underscores.");
-        const {data,error} = await supabase.auth.signUp({email,password});
+        const {data,error} = await supabase.auth.signUp({email,password,options:{data:{username:name}}});
         if (error) throw error;
         if (!data.session) { setError("Account created. Confirm your email, then sign in."); setMode("login"); return; }
-        const {error:profileError} = await supabase.from("profiles").insert({id:data.user!.id,username:name});
-        if (profileError) { await supabase.auth.signOut(); throw Error(profileError.code === "23505" ? "Username already taken." : profileError.message); }
         onAuth(data.session);
       } else {
         const {data,error} = await supabase.auth.signInWithPassword({email,password});
