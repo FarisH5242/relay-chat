@@ -2,8 +2,31 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { createClient, type Session } from "@supabase/supabase-js";
 import { io, type Socket } from "socket.io-client";
 import { LogOut, MessageCircle, Plus, Send, Zap } from "lucide-react";
-const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY);
+// Accept a Supabase project URL even if a dashboard/API path was pasted by mistake.
+// The auth client adds /auth/v1 itself; including it twice breaks login and signup.
+function resolveSupabaseUrl(value: string | undefined): string {
+  const raw = value?.trim().replace(/^["']|["']$/g, "");
+  if (!raw) throw new Error("VITE_SUPABASE_URL is missing in the frontend build.");
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error("VITE_SUPABASE_URL must be a valid HTTPS project URL."); }
+  if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+    throw new Error("VITE_SUPABASE_URL must use HTTPS.");
+  }
+  // The project base URL must not include /auth/v1, /rest/v1 or other API routes.
+  return url.origin;
+}
+const supabaseUrl = resolveSupabaseUrl(import.meta.env.VITE_SUPABASE_URL);
+const supabase = createClient(supabaseUrl, import.meta.env.VITE_SUPABASE_ANON_KEY);
 const API = import.meta.env.VITE_API_URL;
+function explainAuthError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "Authentication failed";
+  if (/invalid path specified in request url/i.test(message)) {
+    return "Supabase rejected the authentication endpoint. Configured project host: " +
+      new URL(supabaseUrl).hostname +
+      ". Check that this host matches Project Settings → Data API → Project URL in Supabase, then rebuild the Render frontend.";
+  }
+  return message;
+}
 type Conversation = { id:string; members:{id:string;username:string}[] };
 type Message = {id:string;conversation_id:string;sender_id:string;body:string;created_at:string};
 function Auth({onAuth}:{onAuth:(session:Session)=>void}) {
@@ -25,7 +48,7 @@ function Auth({onAuth}:{onAuth:(session:Session)=>void}) {
         if (error) throw error;
         onAuth(data.session!);
       }
-    } catch(e) { setError(e instanceof Error ? e.message : "Something went wrong"); }
+    } catch(e) { setError(explainAuthError(e)); }
     finally { setBusy(false); }
   }
   return <main className="auth-page"><section className="auth-card"><div className="brand"><span className="brand-mark"><Zap size={22}/></span> relay<span className="brand-dot">.</span></div><h1>Conversations, connected.</h1><p className="muted">Your space to stay in touch, in real time.</p><div className="auth-switch"><button className={mode==="login"?"selected":""} onClick={()=>{setMode("login");setError("");}}>Sign in</button><button className={mode==="signup"?"selected":""} onClick={()=>{setMode("signup");setError("");}}>Create account</button></div><form onSubmit={submit}>{mode==="signup"&&<label>Username<input value={username} onChange={e=>setUsername(e.target.value)} placeholder="your_username" required minLength={3} maxLength={24}/></label>}<label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" required/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 6 characters" required minLength={6}/></label>{error&&<p className="error">{error}</p>}<button className="primary full" disabled={busy}>{busy?"Please wait…":mode==="login"?"Sign in":"Create account"}</button></form><p className="footnote">Built with React, Supabase & Socket.IO</p></section></main>;
