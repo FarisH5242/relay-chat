@@ -7,8 +7,19 @@ import { Server } from "socket.io";
 import { z } from "zod";
 
 for (const k of ["SUPABASE_URL","SUPABASE_ANON_KEY","SUPABASE_SERVICE_ROLE_KEY","CLIENT_ORIGIN"]) if (!process.env[k]) throw Error("Missing " + k);
-const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession: false } });
-const auth = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!, { auth: { persistSession: false } });
+function normalizedSupabaseUrl(raw: string): string {
+  const input = raw.trim().replace(/^["']|["']$/g, "");
+  const url = new URL(input);
+  if (url.protocol !== "https:") throw Error("SUPABASE_URL must use HTTPS");
+  if (url.pathname !== "/" || url.search || url.hash) {
+    console.warn("SUPABASE_URL contains an unexpected path or query; using project origin only.");
+  }
+  return url.origin;
+}
+const supabaseUrl = normalizedSupabaseUrl(process.env.SUPABASE_URL!);
+console.log("Supabase API configured", { host: new URL(supabaseUrl).hostname });
+const admin = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession: false } });
+const auth = createClient(supabaseUrl, process.env.SUPABASE_ANON_KEY!, { auth: { persistSession: false } });
 const app = express();
 // Normalize Render origin settings (trailing slashes and accidental quotes are common).
 const allowedOrigins = new Set([
@@ -35,7 +46,7 @@ async function userFor(token: string) {
       message: error?.message ?? "No user returned",
       status: error?.status ?? null,
       code: error?.code ?? null,
-      configuredProjectHost: new URL(process.env.SUPABASE_URL!).hostname
+      configuredProjectHost: new URL(supabaseUrl).hostname
     });
     throw Error("Unauthorized");
   }
