@@ -35,12 +35,12 @@ function explainAuthError(error: unknown): string {
   return message;
 }
 type Conversation = { id:string; members:{id:string;username:string}[] };
-class ChatErrorBoundary extends Component<{children:ReactNode},{error:string|null}> {
-  state:{error:string|null} = {error:null};
+class ChatErrorBoundary extends Component<{children:ReactNode},{error:string|null;stack:string|null}> {
+  state:{error:string|null;stack:string|null} = {error:null,stack:null};
   static getDerivedStateFromError(error:Error) { return {error:error.message}; }
-  componentDidCatch(error:Error, info:ErrorInfo) { console.error("Relay chat render failed",error,info); }
+  componentDidCatch(error:Error, info:ErrorInfo) { console.error("Relay chat render failed",error,info); this.setState({stack:error.stack ?? info.componentStack ?? null}); }
   render() {
-    if (this.state.error) return <main className="auth-page"><section className="auth-card"><h1>Chat couldn't open</h1><p className="muted">{this.state.error}</p><button className="primary full" onClick={()=>this.setState({error:null})}>Try again</button><button className="primary full" onClick={()=>window.location.reload()}>Reload Relay</button></section></main>;
+    if (this.state.error) return <main className="auth-page"><section className="auth-card"><h1>Chat couldn't open</h1><p className="muted">{this.state.error}</p>{this.state.stack&&<pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere",fontSize:11,maxHeight:180,overflow:"auto"}}>{this.state.stack}</pre>}<button className="primary full" onClick={()=>this.setState({error:null})}>Try again</button><button className="primary full" onClick={()=>window.location.reload()}>Reload Relay</button></section></main>;
     return this.props.children;
   }
 }
@@ -117,7 +117,7 @@ function Chat({session}:{session:Session}) {
     return()=>{socket.disconnect();socketRef.current=null;};
   },[session.access_token,api,refresh]);
   useEffect(()=>{activeRef.current=active;if(!active){setMessages([]);return;}setMessages([]);socketRef.current?.emit("conversation:join",active,()=>{void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));});void api("/api/conversations/"+active+"/messages").then(setMessages).catch(e=>setError(e.message));},[active,api]);
-  useEffect(()=>bottom.current?.scrollIntoView({behavior:"smooth"}),[messages]);
+  useEffect(()=>{const element=bottom.current;if(element && typeof element.scrollIntoView === "function") element.scrollIntoView({behavior:"smooth"});},[messages]);
   const current = conversations.find(c=>c.id===active);
   function title(c:Conversation){return (Array.isArray(c.members)?c.members:[]).filter(m=>m && m.id!==session.user.id).map(m=>m.username || "Unknown").join(", ")||"Conversation";}
   async function startChat(e:FormEvent) {
