@@ -34,7 +34,7 @@ function explainAuthError(error: unknown): string {
   }
   return message;
 }
-type Conversation = { id:string; members:{id:string;username:string;avatar_path?:string|null}[] };
+type Conversation = { id:string; members:{id:string;username:string;avatar_path?:string|null;last_read_at?:string|null}[] };
 class ChatErrorBoundary extends Component<{children:ReactNode},{error:string|null;stack:string|null}> {
   state:{error:string|null;stack:string|null} = {error:null,stack:null};
   static getDerivedStateFromError(error:Error) { return {error:error.message}; }
@@ -167,7 +167,7 @@ function Chat({session}:{session:Session}) {
     async function loadMessages(id:string){try{const rows=await api("/api/conversations/"+id+"/messages");if(activeRef.current===id)setMessages(Array.isArray(rows)?rows:[]);}catch{}}
     return()=>{if(typingTimer.current)clearTimeout(typingTimer.current);socket.disconnect();socketRef.current=null;};
   },[session.access_token,api,refresh]);
-  useEffect(()=>{activeRef.current=active;setTypingUsers([]);setEditingId(null);setMessageSearch("");setShowMessageSearch(false);if(!active){setMessages([]);return;}setMessages([]);void api("/api/conversations/"+active+"/read",{method:"POST"}).catch(()=>{});socketRef.current?.emit("conversation:join",active,()=>{void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));});void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));},[active,api]);
+  useEffect(()=>{activeRef.current=active;setTypingUsers([]);setEditingId(null);setReadAt({});setMessageSearch("");setShowMessageSearch(false);if(!active){setMessages([]);return;}setMessages([]);void api("/api/conversations/"+active+"/read",{method:"POST"}).catch(()=>{});socketRef.current?.emit("conversation:join",active,()=>{void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));});void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));},[active,api]);
   useEffect(()=>{const element=bottom.current;if(element && typeof element.scrollIntoView === "function") element.scrollIntoView({behavior:"smooth"});},[messages]);
   const current = conversations.find(c=>c.id===active);
   useEffect(()=>{
@@ -177,6 +177,8 @@ function Chat({session}:{session:Session}) {
     for(const conversation of conversations)for(const m of conversation.members??[])if(m.avatar_path&&!avatarUrls[m.avatar_path])void fileUrl(m.avatar_path).then(url=>setAvatarUrls(prev=>({...prev,[m.avatar_path!]:url}))).catch(()=>{});
   },[conversations,api]);
   const partner=current?.members?.find(m=>m.id!==session.user.id);
+  useEffect(()=>{if(!current)return;setReadAt(previous=>({...Object.fromEntries(current.members.filter(m=>m.id!==session.user.id&&m.last_read_at).map(m=>[m.id,m.last_read_at!])),...previous}));},[current?.id,conversations,session.user.id]);
+  useEffect(()=>{if(!active||!connected)return;const last=messages[messages.length-1];if(last&&last.sender_id!==session.user.id)void api("/api/conversations/"+active+"/read",{method:"POST"}).catch(()=>{});},[active,connected,messages,api,session.user.id]);
   const visibleMessages = messages.filter(m=>!messageSearch.trim()||m.body.toLowerCase().includes(messageSearch.trim().toLowerCase()));
   function title(c:Conversation){return (Array.isArray(c.members)?c.members:[]).filter(m=>m && m.id!==session.user.id).map(m=>m.username || "Unknown").join(", ")||"Conversation";}
   async function startChat(e:FormEvent) {
