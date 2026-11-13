@@ -30,7 +30,15 @@ type AuthReq = Request & { userId?: string };
 const safe = (fn: (req: AuthReq, res: Response) => Promise<void>) => (req: AuthReq, res: Response, next: NextFunction) => { Promise.resolve(fn(req,res)).catch(next); };
 async function userFor(token: string) {
   const { data, error } = await auth.auth.getUser(token);
-  if (error || !data.user) throw Error("Unauthorized");
+  if (error || !data.user) {
+    console.error("Supabase token validation failed", {
+      message: error?.message ?? "No user returned",
+      status: error?.status ?? null,
+      code: error?.code ?? null,
+      configuredProjectHost: new URL(process.env.SUPABASE_URL!).hostname
+    });
+    throw Error("Unauthorized");
+  }
   return data.user.id;
 }
 const guard = async (req: AuthReq, res: Response, next: NextFunction) => {
