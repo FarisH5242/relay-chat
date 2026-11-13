@@ -1,7 +1,7 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from "react";
 import { createClient, type Session } from "@supabase/supabase-js";
 import { io, type Socket } from "socket.io-client";
-import { LogOut, MessageCircle, Plus, Send, Layers3, Search, Settings2, X, Check, RefreshCw, WifiOff, Pencil, Trash2 } from "lucide-react";
+import { LogOut, MessageCircle, Plus, Send, Layers3, Search, Settings2, X, Check, WifiOff, Pencil, Trash2 } from "lucide-react";
 // Accept a Supabase project URL even if a dashboard/API path was pasted by mistake.
 // The auth client adds /auth/v1 itself; including it twice breaks login and signup.
 function resolveSupabaseUrl(value: string | undefined): string {
@@ -40,7 +40,7 @@ class ChatErrorBoundary extends Component<{children:ReactNode},{error:string|nul
   static getDerivedStateFromError(error:Error) { return {error:error.message}; }
   componentDidCatch(error:Error, info:ErrorInfo) { console.error("Relay chat render failed",error,info); this.setState({stack:error.stack ?? info.componentStack ?? null}); }
   render() {
-    if (this.state.error) return <main className="auth-page"><section className="auth-card"><h1>Chat couldn't open</h1><p className="muted">{this.state.error}</p>{this.state.stack&&<pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere",fontSize:11,maxHeight:180,overflow:"auto"}}>{this.state.stack}</pre>}<button className="primary full" onClick={()=>this.setState({error:null})}>Try again</button><button className="primary full" onClick={()=>window.location.reload()}>Reload Relay</button></section></main>;
+    if (this.state.error) return <main className="auth-page"><section className="auth-card"><h1>Chat couldn't open</h1><p className="muted">{this.state.error}</p><button className="primary full" onClick={()=>this.setState({error:null})}>Try again</button><button className="primary full" onClick={()=>window.location.reload()}>Reload Relay</button></section></main>;
     return this.props.children;
   }
 }
