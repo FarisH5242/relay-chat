@@ -17,7 +17,14 @@ function resolveSupabaseUrl(value: string | undefined): string {
 }
 const supabaseUrl = resolveSupabaseUrl(import.meta.env.VITE_SUPABASE_URL);
 const supabase = createClient(supabaseUrl, import.meta.env.VITE_SUPABASE_ANON_KEY);
-const API = import.meta.env.VITE_API_URL;
+const API = (import.meta.env.VITE_API_URL ?? "").trim().replace(/^["']|["']$/g, "").replace(/\/+$/, "");
+function apiEndpoint(path: string): string {
+  if (!API) throw Error("Backend URL is missing. Set VITE_API_URL in Render relay-web to your relay-api service URL, then redeploy.");
+  let parsed: URL;
+  try { parsed = new URL(API); } catch { throw Error("VITE_API_URL is invalid. Use the full HTTPS URL of relay-api."); }
+  if (parsed.protocol !== "https:" && parsed.hostname !== "localhost") throw Error("VITE_API_URL must use HTTPS.");
+  return API + path;
+}
 function explainAuthError(error: unknown): string {
   const message = error instanceof Error ? error.message : "Authentication failed";
   if (/invalid path specified in request url/i.test(message)) {
@@ -64,15 +71,21 @@ function Chat({session}:{session:Session}) {
   const socketRef = useRef<Socket|null>(null); const activeRef = useRef<string|null>(null);
   const bottom = useRef<HTMLDivElement|null>(null);
   const api = useCallback(async(path:string,init?:RequestInit) => {
-    const response = await fetch(API+path,{...init,headers:{"Content-Type":"application/json",Authorization:"Bearer "+session.access_token,...init?.headers}});
-    const data = await response.json();
-    if (!response.ok) throw Error(data.error ?? "Request failed");
+    const endpoint = apiEndpoint(path);
+    let response: Response;
+    try {
+      response = await fetch(endpoint,{...init,headers:{"Content-Type":"application/json",Authorization:"Bearer "+session.access_token,...init?.headers}});
+    } catch {
+      throw Error("Cannot reach Relay API at " + new URL(endpoint).origin + ". Check VITE_API_URL, the relay-api Render service status, and its CLIENT_ORIGIN setting.");
+    }
+    const data = await response.json().catch(() => null);
+    if (!response.ok) throw Error(data?.error ?? "Relay API returned HTTP " + response.status);
     return data;
   },[session.access_token]);
   const refresh = useCallback(async()=>{ try {setConversations(await api("/api/conversations"));} catch(e){setError((e as Error).message);} },[api]);
   useEffect(()=>{ supabase.from("profiles").select("username").eq("id",session.user.id).maybeSingle().then(({data})=>setProfile(data?.username ?? "")); void refresh(); },[session.user.id,refresh]);
   useEffect(()=>{
-    const socket = io(API,{auth:{token:session.access_token},transports:["websocket","polling"]});
+    const socket = io(API || undefined,{auth:{token:session.access_token},transports:["websocket","polling"]});
     socketRef.current = socket;
     socket.on("connect",()=>{setConnected(true);if(activeRef.current)socket.emit("conversation:join",activeRef.current,()=>{void loadMessages(activeRef.current!);});});
     socket.on("disconnect",()=>setConnected(false));
