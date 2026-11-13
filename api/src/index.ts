@@ -125,6 +125,30 @@ app.get("/api/conversations/:id/messages",guard,safe(async(req,res) => {
   if (error) throw error;
   res.json((data ?? []).reverse());
 }));
+app.patch("/api/messages/:id",guard,safe(async(req,res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  const parsed = z.object({body:z.string().trim().min(1).max(2000)}).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({error:"Message must contain 1–2000 characters."}); return; }
+  const {data:existing,error:lookupError} = await admin.from("messages").select("id,conversation_id,sender_id").eq("id",id).maybeSingle();
+  if (lookupError) throw lookupError;
+  if (!existing) { res.status(404).json({error:"Message not found"}); return; }
+  if (existing.sender_id!==req.userId || !(await member(existing.conversation_id,req.userId!))) {res.status(403).json({error:"You can only edit your own messages"});return;}
+  const {data,error}=await admin.from("messages").update({body:parsed.data.body}).eq("id",id).eq("sender_id",req.userId!).select("id,conversation_id,sender_id,body,created_at").single();
+  if(error)throw error;
+  io.to("conversation:"+existing.conversation_id).emit("message:updated",data);
+  res.json(data);
+}));
+app.delete("/api/messages/:id",guard,safe(async(req,res) => {
+  const id=z.string().uuid().parse(req.params.id);
+  const {data:existing,error:lookupError}=await admin.from("messages").select("id,conversation_id,sender_id").eq("id",id).maybeSingle();
+  if(lookupError)throw lookupError;
+  if(!existing){res.status(404).json({error:"Message not found"});return;}
+  if(existing.sender_id!==req.userId || !(await member(existing.conversation_id,req.userId!))){res.status(403).json({error:"You can only delete your own messages"});return;}
+  const {error}=await admin.from("messages").delete().eq("id",id).eq("sender_id",req.userId!);
+  if(error)throw error;
+  io.to("conversation:"+existing.conversation_id).emit("message:deleted",{id,conversationId:existing.conversation_id});
+  res.json({ok:true});
+}));
 io.use(async(socket,next) => {
   try { if (typeof socket.handshake.auth.token !== "string") throw Error(); socket.data.userId = await userFor(socket.handshake.auth.token); next(); }
   catch { next(Error("Unauthorized")); }
