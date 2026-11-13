@@ -72,16 +72,28 @@ function Chat({session}:{session:Session}) {
   const bottom = useRef<HTMLDivElement|null>(null);
   const api = useCallback(async(path:string,init?:RequestInit) => {
     const endpoint = apiEndpoint(path);
-    let response: Response;
-    try {
-      response = await fetch(endpoint,{...init,headers:{"Content-Type":"application/json",Authorization:"Bearer "+session.access_token,...init?.headers}});
-    } catch {
-      throw Error("Cannot reach Relay API at " + new URL(endpoint).origin + ". Check VITE_API_URL, the relay-api Render service status, and its CLIENT_ORIGIN setting.");
+    const request = async(token:string) => {
+      try {
+        return await fetch(endpoint,{...init,headers:{"Content-Type":"application/json",Authorization:"Bearer "+token,...init?.headers}});
+      } catch {
+        throw Error("Cannot reach Relay API at " + new URL(endpoint).origin + ". Check VITE_API_URL and relay-api service status.");
+      }
+    };
+    const {data:sessionData,error:sessionError} = await supabase.auth.getSession();
+    if (sessionError || !sessionData.session) throw Error("Your session has expired. Please sign out and sign in again.");
+    let response = await request(sessionData.session.access_token);
+    if (response.status === 401) {
+      const {data:refreshed,error:refreshError} = await supabase.auth.refreshSession();
+      if (refreshError || !refreshed.session) throw Error("Your session could not be refreshed. Please sign out and sign in again.");
+      response = await request(refreshed.session.access_token);
     }
     const data = await response.json().catch(() => null);
-    if (!response.ok) throw Error(data?.error ?? "Relay API returned HTTP " + response.status);
+    if (!response.ok) {
+      if (response.status === 401) throw Error("Relay API rejected your Supabase session. Check that relay-api SUPABASE_URL and SUPABASE_ANON_KEY belong to the same Supabase project as relay-web.");
+      throw Error(data?.error ?? "Relay API returned HTTP " + response.status);
+    }
     return data;
-  },[session.access_token]);
+  },[]);
   const refresh = useCallback(async()=>{ try {setConversations(await api("/api/conversations"));} catch(e){setError((e as Error).message);} },[api]);
   useEffect(()=>{ supabase.from("profiles").select("username").eq("id",session.user.id).maybeSingle().then(({data})=>setProfile(data?.username ?? "")); void refresh(); },[session.user.id,refresh]);
   useEffect(()=>{
