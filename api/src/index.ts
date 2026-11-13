@@ -65,6 +65,23 @@ async function member(conversationId: string, userId: string) {
   return !!data;
 }
 app.get("/health",(_req,res) => res.json({ ok:true }));
+app.get("/api/me",guard,safe(async(req,res) => {
+  const {data,error} = await admin.from("profiles").select("id,username,created_at").eq("id",req.userId!).maybeSingle();
+  if (error) throw error;
+  if (!data) { res.status(404).json({error:"Profile missing. Run the profile backfill migration in Supabase."}); return; }
+  res.json(data);
+}));
+app.patch("/api/me",guard,safe(async(req,res) => {
+  const parsed = z.object({username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/)}).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({error:"Username must be 3–24 letters, numbers or underscores."}); return; }
+  const {data,error} = await admin.from("profiles").update({username:parsed.data.username}).eq("id",req.userId!).select("id,username").single();
+  if (error) {
+    if (error.code === "23505") { res.status(409).json({error:"That username is already taken."}); return; }
+    throw error;
+  }
+  io.emit("profiles:updated");
+  res.json(data);
+}));
 app.get("/api/conversations",guard,safe(async(req,res) => {
   const { data: mine, error } = await admin.from("conversation_members").select("conversation_id").eq("user_id",req.userId!);
   if (error) throw error;
@@ -118,6 +135,14 @@ io.on("connection",socket => {
   socket.on("conversation:join",async(id:unknown,ack?: (result:{ok:boolean})=>void) => {
     try { if (typeof id !== "string" || !(await member(id,userId))) throw Error(); await socket.join("conversation:"+id); ack?.({ok:true}); }
     catch { ack?.({ok:false}); }
+  });
+  socket.on("typing",async(payload:unknown) => {
+    const parsed = z.object({conversationId:z.string().uuid(),isTyping:z.boolean()}).safeParse(payload);
+    if (!parsed.success) return;
+    try {
+      if (!(await member(parsed.data.conversationId,userId))) return;
+      socket.to("conversation:"+parsed.data.conversationId).emit("typing", {conversationId:parsed.data.conversationId,userId,isTyping:parsed.data.isTyping});
+    } catch { /* Ignore invalid typing updates. */ }
   });
   socket.on("message:send",async(payload:unknown,ack?: (result:{ok:boolean;error?:string})=>void) => {
     try {
