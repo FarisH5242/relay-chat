@@ -46,6 +46,24 @@ A full-stack, real-time direct messaging app for a software engineering portfoli
 
 After Render assigns URLs, verify `CLIENT_ORIGIN` and `VITE_API_URL`, save and redeploy if necessary. Set the Supabase Auth Site URL to the frontend URL. Changes to Vite environment variables require rebuilding the static site.
 
+## Relay 2.1: photos, attachments and read receipts
+
+Before deploying **either** Render service, run
+[`supabase/migrations/20261113_relay_files_receipts.sql`](supabase/migrations/20261113_relay_files_receipts.sql)
+in your existing Supabase project's SQL Editor. It adds avatar paths,
+attachment paths, member read timestamps and a private storage bucket.
+Then deploy **relay-api first**, followed by **relay-web**.
+
+The app now supports profile photo uploads, private file attachments
+(images, PDFs and plain text, up to 2 MB), read receipts, message editing
+and deletion, typing indicators, and basic in-memory message/upload rate limits.
+File downloads use short-lived signed URLs served only after API authorization.
+The API uses the existing Supabase service-role credentials; never put the
+service-role key in frontend environment variables.
+
+These are portfolio-level protections, not a replacement for production
+security auditing, virus scanning, distributed rate limits, or abuse reporting.
+
 ## Relay 2.0 upgrade (existing deployments)
 
 Deploy the latest commit to **both** Render services: `relay-api` and `relay-web`.
