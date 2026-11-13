@@ -142,9 +142,9 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   if (error) throw error;
   const ids = (mine ?? []).map(m => m.conversation_id);
   if (!ids.length) { res.json([]); return; }
-  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,profiles(username,avatar_path)").in("conversation_id",ids);
+  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path)").in("conversation_id",ids);
   if (e) throw e;
-  res.json(ids.map(id => ({ id, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null })) })));
+  res.json(ids.map(id => ({ id, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
   const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/) }).safeParse(req.body);
