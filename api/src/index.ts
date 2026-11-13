@@ -75,7 +75,12 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   res.json(ids.map(id => ({ id, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown" })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
-  const { username } = z.object({ username:z.string().regex(/^[a-z0-9_]{3,24}$/) }).parse(req.body);
+  const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/) }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({error:"Enter the Relay username (not an email): 3–24 lowercase letters, numbers or underscores. Check the username in Supabase public.profiles."});
+    return;
+  }
+  const { username } = parsed.data;
   const { data: target, error: e } = await admin.from("profiles").select("id").eq("username",username).maybeSingle();
   if (e) throw e;
   if (!target) { res.status(404).json({error:"Username not found"}); return; }
