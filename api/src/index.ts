@@ -34,10 +34,39 @@ const corsOptions = {
   }
 };
 app.use(cors(corsOptions));
-app.use(express.json({ limit: "16kb" }));
+app.use(express.json({ limit: "3mb" }));
 const server = createServer(app);
 const io = new Server(server, { cors: corsOptions });
 type AuthReq = Request & { userId?: string };
+const rateBuckets=new Map<string,{count:number;reset:number}>();
+function limitRate(key:string,max:number,windowMs:number):boolean {
+  const now=Date.now();
+  if(rateBuckets.size>20000)for(const [k,v] of rateBuckets)if(v.reset<=now)rateBuckets.delete(k);
+  const bucket=rateBuckets.get(key);
+  if(!bucket||bucket.reset<=now){rateBuckets.set(key,{count:1,reset:now+windowMs});return true;}
+  if(bucket.count>=max)return false;
+  bucket.count++;return true;
+}
+const filePayload=z.object({name:z.string().min(1).max(120),mime:z.string().min(1).max(100),data:z.string().min(1).max(2800000)});
+const allowedMimes=new Set(["image/png","image/jpeg","image/webp","image/gif","application/pdf","text/plain"]);
+async function storeFile(userId:string,kind:"avatars"|"attachments",payload:unknown) {
+  const parsed=filePayload.safeParse(payload);
+  if(!parsed.success)throw Error("Invalid file");
+  const {name,mime,data}=parsed.data;
+  if(!allowedMimes.has(mime))throw Error("Unsupported file type. Use images, PDF or plain text.");
+  const bytes=Buffer.from(data,"base64");
+  if(!bytes.length||bytes.length>2*1024*1024)throw Error("File must be under 2 MB.");
+  const ext=({ "image/png":"png","image/jpeg":"jpg","image/webp":"webp","image/gif":"gif","application/pdf":"pdf","text/plain":"txt"} as Record<string,string>)[mime];
+  const path=userId+"/"+crypto.randomUUID()+"."+ext;
+  const {error}=await admin.storage.from("relay-files").upload(path,bytes,{contentType:mime,upsert:false});
+  if(error)throw error;
+  return {path,name:name.replace(/[\\/<>]/g,"_"),mime};
+}
+async function signedFile(path:string) {
+  const {data,error}=await admin.storage.from("relay-files").createSignedUrl(path,3600);
+  if(error)throw error;
+  return data.signedUrl;
+}
 const safe = (fn: (req: AuthReq, res: Response) => Promise<void>) => (req: AuthReq, res: Response, next: NextFunction) => { Promise.resolve(fn(req,res)).catch(next); };
 async function userFor(token: string) {
   const { data, error } = await auth.auth.getUser(token);
@@ -65,8 +94,34 @@ async function member(conversationId: string, userId: string) {
   return !!data;
 }
 app.get("/health",(_req,res) => res.json({ ok:true }));
+app.get("/api/files",guard,safe(async(req,res) => {
+  const path=z.string().min(1).max(250).parse(req.query.path);
+  if(!path.startsWith(req.userId!+"/")) {
+    const {data:messages,error}=await admin.from("messages").select("conversation_id").eq("attachment_path",path).limit(10);
+    if(error)throw error;
+    let authorized=false;
+    for(const m of messages??[])if(await member(m.conversation_id,req.userId!)){authorized=true;break;}
+    if(!authorized){
+      const {data:avatar}=await admin.from("profiles").select("id").eq("avatar_path",path).maybeSingle();
+      if(!avatar){res.status(403).json({error:"File access denied"});return;}
+    }
+  }
+  res.json({url:await signedFile(path)});
+}));
+app.post("/api/me/avatar",guard,safe(async(req,res) => {
+  if(!limitRate("avatar:"+req.userId,10,60*60*1000)){res.status(429).json({error:"Too many uploads. Try again later."});return;}
+  const {mime}=req.body??{};
+  if(!["image/png","image/jpeg","image/webp","image/gif"].includes(mime)){res.status(400).json({error:"Choose a PNG, JPG, WebP or GIF image."});return;}
+  try{
+    const file=await storeFile(req.userId!,"avatars",req.body);
+    const {error}=await admin.from("profiles").update({avatar_path:file.path}).eq("id",req.userId!);
+    if(error)throw error;
+    io.emit("profiles:updated");
+    res.json({path:file.path,url:await signedFile(file.path)});
+  }catch(e){res.status(400).json({error:(e as Error).message});}
+}));
 app.get("/api/me",guard,safe(async(req,res) => {
-  const {data,error} = await admin.from("profiles").select("id,username,created_at").eq("id",req.userId!).maybeSingle();
+  const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at").eq("id",req.userId!).maybeSingle();
   if (error) throw error;
   if (!data) { res.status(404).json({error:"Profile missing. Run the profile backfill migration in Supabase."}); return; }
   res.json(data);
@@ -87,9 +142,9 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   if (error) throw error;
   const ids = (mine ?? []).map(m => m.conversation_id);
   if (!ids.length) { res.json([]); return; }
-  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,profiles(username)").in("conversation_id",ids);
+  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,profiles(username,avatar_path)").in("conversation_id",ids);
   if (e) throw e;
-  res.json(ids.map(id => ({ id, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown" })) })));
+  res.json(ids.map(id => ({ id, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
   const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/) }).safeParse(req.body);
@@ -121,9 +176,31 @@ app.post("/api/conversations",guard,safe(async(req,res) => {
 app.get("/api/conversations/:id/messages",guard,safe(async(req,res) => {
   const id = z.string().uuid().parse(req.params.id);
   if (!(await member(id,req.userId!))) { res.status(403).json({error:"Forbidden"}); return; }
-  const {data,error} = await admin.from("messages").select("id,conversation_id,sender_id,body,created_at").eq("conversation_id",id).order("created_at",{ascending:false}).limit(100);
+  const {data,error} = await admin.from("messages").select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name").eq("conversation_id",id).order("created_at",{ascending:false}).limit(100);
   if (error) throw error;
   res.json((data ?? []).reverse());
+}));
+app.post("/api/conversations/:id/attachments",guard,safe(async(req,res) => {
+  const id=z.string().uuid().parse(req.params.id);
+  if(!(await member(id,req.userId!))){res.status(403).json({error:"Forbidden"});return;}
+  if(!limitRate("upload:"+req.userId,20,60*60*1000)){res.status(429).json({error:"Upload limit reached. Try again later."});return;}
+  try{
+    const file=await storeFile(req.userId!,"attachments",req.body);
+    const {data,error}=await admin.from("messages").insert({conversation_id:id,sender_id:req.userId,body:file.name,attachment_path:file.path,attachment_name:file.name}).select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name").single();
+    if(error)throw error;
+    io.to("conversation:"+id).emit("message:new",data);
+    const {data:members}=await admin.from("conversation_members").select("user_id").eq("conversation_id",id);
+    for(const m of members??[])io.to("user:"+m.user_id).emit("conversation:activity",{conversationId:id});
+    res.status(201).json(data);
+  }catch(e){res.status(400).json({error:(e as Error).message});}
+}));
+app.post("/api/conversations/:id/read",guard,safe(async(req,res) => {
+  const id=z.string().uuid().parse(req.params.id);
+  if(!(await member(id,req.userId!))){res.status(403).json({error:"Forbidden"});return;}
+  const {error}=await admin.from("conversation_members").update({last_read_at:new Date().toISOString()}).eq("conversation_id",id).eq("user_id",req.userId!);
+  if(error)throw error;
+  io.to("conversation:"+id).emit("conversation:read",{conversationId:id,userId:req.userId,at:new Date().toISOString()});
+  res.json({ok:true});
 }));
 app.patch("/api/messages/:id",guard,safe(async(req,res) => {
   const id = z.string().uuid().parse(req.params.id);
@@ -172,6 +249,7 @@ io.on("connection",socket => {
     try {
       const {conversationId,body} = z.object({conversationId:z.string().uuid(),body:z.string().trim().min(1).max(2000)}).parse(payload);
       if (!(await member(conversationId,userId))) throw Error();
+      if(!limitRate("send:"+userId,30,60*1000)){ack?.({ok:false,error:"You are sending messages too quickly. Please wait a minute."});return;}
       const {data,error} = await admin.from("messages").insert({conversation_id:conversationId,sender_id:userId,body}).select("id,conversation_id,sender_id,body,created_at").single();
       if (error) throw error;
       io.to("conversation:"+conversationId).emit("message:new",data);
