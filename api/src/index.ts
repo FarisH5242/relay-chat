@@ -10,10 +10,22 @@ for (const k of ["SUPABASE_URL","SUPABASE_ANON_KEY","SUPABASE_SERVICE_ROLE_KEY",
 const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession: false } });
 const auth = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!, { auth: { persistSession: false } });
 const app = express();
-app.use(cors({ origin: process.env.CLIENT_ORIGIN! }));
+// Normalize Render origin settings (trailing slashes and accidental quotes are common).
+const allowedOrigins = new Set([
+  process.env.CLIENT_ORIGIN!,
+  "https://relay-web-ywvk.onrender.com"
+].map(value => value.trim().replace(/^["']|["']$/g, "").replace(/\/+$/, "")));
+const corsOptions = {
+  origin(origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) {
+    // Non-browser clients (e.g. health checks) do not send Origin.
+    if (!origin || allowedOrigins.has(origin.replace(/\/+$/, ""))) return callback(null, true);
+    callback(new Error("Origin not allowed: " + origin));
+  }
+};
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "16kb" }));
 const server = createServer(app);
-const io = new Server(server, { cors: { origin: process.env.CLIENT_ORIGIN! } });
+const io = new Server(server, { cors: corsOptions });
 type AuthReq = Request & { userId?: string };
 const safe = (fn: (req: AuthReq, res: Response) => Promise<void>) => (req: AuthReq, res: Response, next: NextFunction) => { Promise.resolve(fn(req,res)).catch(next); };
 async function userFor(token: string) {
