@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from "react";
 import { createClient, type Session } from "@supabase/supabase-js";
 import { io, type Socket } from "socket.io-client";
 import { LogOut, MessageCircle, Plus, Send, Zap } from "lucide-react";
@@ -35,6 +35,15 @@ function explainAuthError(error: unknown): string {
   return message;
 }
 type Conversation = { id:string; members:{id:string;username:string}[] };
+class ChatErrorBoundary extends Component<{children:ReactNode},{error:string|null}> {
+  state:{error:string|null} = {error:null};
+  static getDerivedStateFromError(error:Error) { return {error:error.message}; }
+  componentDidCatch(error:Error, info:ErrorInfo) { console.error("Relay chat render failed",error,info); }
+  render() {
+    if (this.state.error) return <main className="auth-page"><section className="auth-card"><h1>Chat couldn't open</h1><p className="muted">{this.state.error}</p><button className="primary full" onClick={()=>this.setState({error:null})}>Try again</button><button className="primary full" onClick={()=>window.location.reload()}>Reload Relay</button></section></main>;
+    return this.props.children;
+  }
+}
 type Message = {id:string;conversation_id:string;sender_id:string;body:string;created_at:string};
 function Auth({onAuth}:{onAuth:(session:Session)=>void}) {
   const [mode,setMode] = useState<"login"|"signup">("login");
@@ -94,7 +103,7 @@ function Chat({session}:{session:Session}) {
     }
     return data;
   },[]);
-  const refresh = useCallback(async()=>{ try {setConversations(await api("/api/conversations"));} catch(e){setError((e as Error).message);} },[api]);
+  const refresh = useCallback(async()=>{ try {const rows = await api("/api/conversations");setConversations(Array.isArray(rows)?rows:[]);} catch(e){setError((e as Error).message);} },[api]);
   useEffect(()=>{ supabase.from("profiles").select("username").eq("id",session.user.id).maybeSingle().then(({data})=>setProfile(data?.username ?? "")); void refresh(); },[session.user.id,refresh]);
   useEffect(()=>{
     const socket = io(API || undefined,{auth:{token:session.access_token},transports:["websocket","polling"]});
@@ -104,13 +113,13 @@ function Chat({session}:{session:Session}) {
     socket.on("message:new",(message:Message)=>{if(message.conversation_id===activeRef.current)setMessages(prev=>prev.some(m=>m.id===message.id)?prev:[...prev,message]);});
     socket.on("conversations:refresh",()=>void refresh());
     socket.on("conversation:activity",({conversationId}:{conversationId:string})=>{if(conversationId===activeRef.current)void loadMessages(conversationId);});
-    async function loadMessages(id:string){try{const rows=await api("/api/conversations/"+id+"/messages");if(activeRef.current===id)setMessages(rows);}catch{}}
+    async function loadMessages(id:string){try{const rows=await api("/api/conversations/"+id+"/messages");if(activeRef.current===id)setMessages(Array.isArray(rows)?rows:[]);}catch{}}
     return()=>{socket.disconnect();socketRef.current=null;};
   },[session.access_token,api,refresh]);
-  useEffect(()=>{activeRef.current=active;if(!active){setMessages([]);return;}setMessages([]);socketRef.current?.emit("conversation:join",active,()=>{void api("/api/conversations/"+active+"/messages").then(setMessages).catch(e=>setError(e.message));});void api("/api/conversations/"+active+"/messages").then(setMessages).catch(e=>setError(e.message));},[active,api]);
+  useEffect(()=>{activeRef.current=active;if(!active){setMessages([]);return;}setMessages([]);socketRef.current?.emit("conversation:join",active,()=>{void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));});void api("/api/conversations/"+active+"/messages").then(setMessages).catch(e=>setError(e.message));},[active,api]);
   useEffect(()=>bottom.current?.scrollIntoView({behavior:"smooth"}),[messages]);
   const current = conversations.find(c=>c.id===active);
-  function title(c:Conversation){return c.members.filter(m=>m.id!==session.user.id).map(m=>m.username).join(", ")||"Conversation";}
+  function title(c:Conversation){return (Array.isArray(c.members)?c.members:[]).filter(m=>m && m.id!==session.user.id).map(m=>m.username || "Unknown").join(", ")||"Conversation";}
   async function startChat(e:FormEvent) {
     e.preventDefault();setError("");
     try {const result=await api("/api/conversations",{method:"POST",body:JSON.stringify({username:newName.trim().toLowerCase()})});await refresh();setActive(result.id);setCreating(false);setNewName("");}
@@ -128,5 +137,5 @@ export default function App() {
   const [session,setSession] = useState<Session|null>(null); const [loading,setLoading] = useState(true);
   useEffect(()=>{supabase.auth.getSession().then(({data})=>{setSession(data.session);setLoading(false);});const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,s)=>setSession(s));return()=>subscription.unsubscribe();},[]);
   if(loading)return <div className="loading">Loading Relay…</div>;
-  return session?<Chat key={session.access_token} session={session}/>:<Auth onAuth={setSession}/>;
+  return session?<ChatErrorBoundary><Chat key={session.user.id} session={session}/></ChatErrorBoundary>:<Auth onAuth={setSession}/>;
 }
