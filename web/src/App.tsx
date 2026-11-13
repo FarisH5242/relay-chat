@@ -1,7 +1,7 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from "react";
 import { createClient, type Session } from "@supabase/supabase-js";
 import { io, type Socket } from "socket.io-client";
-import { LogOut, MessageCircle, Plus, Send, Layers3, Search } from "lucide-react";
+import { LogOut, MessageCircle, Plus, Send, Layers3, Search, Settings2, X, Check, RefreshCw, WifiOff } from "lucide-react";
 // Accept a Supabase project URL even if a dashboard/API path was pasted by mistake.
 // The auth client adds /auth/v1 itself; including it twice breaks login and signup.
 function resolveSupabaseUrl(value: string | undefined): string {
@@ -77,6 +77,13 @@ function Chat({session}:{session:Session}) {
   const [draft,setDraft] = useState(""); const [newName,setNewName] = useState("");
   const [creating,setCreating] = useState(false); const [error,setError] = useState("");
   const [search,setSearch] = useState("");
+  const [messageSearch,setMessageSearch] = useState("");
+  const [showMessageSearch,setShowMessageSearch] = useState(false);
+  const [showProfile,setShowProfile] = useState(false);
+  const [profileName,setProfileName] = useState("");
+  const [savingProfile,setSavingProfile] = useState(false);
+  const [typingUsers,setTypingUsers] = useState<string[]>([]);
+  const typingTimer = useRef<ReturnType<typeof setTimeout>|null>(null);
   const [connected,setConnected] = useState(false);
   const socketRef = useRef<Socket|null>(null); const activeRef = useRef<string|null>(null);
   const bottom = useRef<HTMLDivElement|null>(null);
@@ -105,7 +112,19 @@ function Chat({session}:{session:Session}) {
     return data;
   },[]);
   const refresh = useCallback(async()=>{ try {const rows = await api("/api/conversations");setConversations(Array.isArray(rows)?rows:[]);} catch(e){setError((e as Error).message);} },[api]);
-  useEffect(()=>{ supabase.from("profiles").select("username").eq("id",session.user.id).maybeSingle().then(({data})=>setProfile(data?.username ?? "")); void refresh(); },[session.user.id,refresh]);
+  useEffect(()=>{ void api("/api/me").then(data=>{setProfile(data.username);setProfileName(data.username);}).catch(e=>setError(e.message));void refresh(); },[api,refresh]);
+  async function saveProfile(e:FormEvent) {
+    e.preventDefault();setSavingProfile(true);setError("");
+    try {const data=await api("/api/me",{method:"PATCH",body:JSON.stringify({username:profileName.trim()})});setProfile(data.username);setProfileName(data.username);setShowProfile(false);await refresh();}
+    catch(e){setError((e as Error).message);}finally{setSavingProfile(false);}
+  }
+  function updateDraft(value:string) {
+    setDraft(value);
+    if (!active || !socketRef.current?.connected) return;
+    socketRef.current.emit("typing",{conversationId:active,isTyping:value.trim().length>0});
+    if (typingTimer.current) clearTimeout(typingTimer.current);
+    typingTimer.current=setTimeout(()=>socketRef.current?.emit("typing",{conversationId:active,isTyping:false}),1400);
+  }
   useEffect(()=>{
     const socket = io(API || undefined,{auth:{token:session.access_token},transports:["websocket","polling"]});
     socketRef.current = socket;
@@ -113,13 +132,19 @@ function Chat({session}:{session:Session}) {
     socket.on("disconnect",()=>setConnected(false));
     socket.on("message:new",(message:Message)=>{if(message.conversation_id===activeRef.current)setMessages(prev=>prev.some(m=>m.id===message.id)?prev:[...prev,message]);});
     socket.on("conversations:refresh",()=>void refresh());
+    socket.on("profiles:updated",()=>void refresh());
+    socket.on("typing",({conversationId,userId,isTyping}:{conversationId:string;userId:string;isTyping:boolean})=>{
+      if(conversationId!==activeRef.current || userId===session.user.id)return;
+      setTypingUsers(previous=>isTyping?Array.from(new Set([...previous,userId])):previous.filter(id=>id!==userId));
+    });
     socket.on("conversation:activity",({conversationId}:{conversationId:string})=>{if(conversationId===activeRef.current)void loadMessages(conversationId);});
     async function loadMessages(id:string){try{const rows=await api("/api/conversations/"+id+"/messages");if(activeRef.current===id)setMessages(Array.isArray(rows)?rows:[]);}catch{}}
-    return()=>{socket.disconnect();socketRef.current=null;};
+    return()=>{if(typingTimer.current)clearTimeout(typingTimer.current);socket.disconnect();socketRef.current=null;};
   },[session.access_token,api,refresh]);
-  useEffect(()=>{activeRef.current=active;if(!active){setMessages([]);return;}setMessages([]);socketRef.current?.emit("conversation:join",active,()=>{void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));});void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));},[active,api]);
+  useEffect(()=>{activeRef.current=active;setTypingUsers([]);setMessageSearch("");setShowMessageSearch(false);if(!active){setMessages([]);return;}setMessages([]);socketRef.current?.emit("conversation:join",active,()=>{void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));});void api("/api/conversations/"+active+"/messages").then(rows=>setMessages(Array.isArray(rows)?rows:[])).catch(e=>setError(e.message));},[active,api]);
   useEffect(()=>{const element=bottom.current;if(element && typeof element.scrollIntoView === "function") element.scrollIntoView({behavior:"smooth"});},[messages]);
   const current = conversations.find(c=>c.id===active);
+  const visibleMessages = messages.filter(m=>!messageSearch.trim()||m.body.toLowerCase().includes(messageSearch.trim().toLowerCase()));
   function title(c:Conversation){return (Array.isArray(c.members)?c.members:[]).filter(m=>m && m.id!==session.user.id).map(m=>m.username || "Unknown").join(", ")||"Conversation";}
   async function startChat(e:FormEvent) {
     e.preventDefault();setError("");
@@ -130,9 +155,9 @@ function Chat({session}:{session:Session}) {
     e.preventDefault();const body=draft.trim();if(!body||!active)return;
     const socket=socketRef.current;if(!socket?.connected){setError("Reconnecting… please try again.");return;}
     socket.emit("message:send",{conversationId:active,body},(result:{ok:boolean;error?:string})=>{if(!result.ok)setError(result.error??"Message failed");});
-    setDraft("");
+    setDraft("");socket.emit("typing",{conversationId:active,isTyping:false});
   }
-  return <div className="shell"><aside className="sidebar"><div className="side-top"><div className="brand"><span className="brand-mark"><Layers3 size={19}/></span> Relay</div><button className="icon-button" title="Sign out" onClick={()=>void supabase.auth.signOut()}><LogOut size={18}/></button></div><div className="side-heading"><div><h2>Inbox</h2><p className="muted">Direct conversations</p></div><button className="icon-button add" title="New chat" onClick={()=>setCreating(v=>!v)}><Plus size={20}/></button></div>{creating&&<form className="new-chat" onSubmit={startChat}><label>Start a conversation<input autoFocus placeholder="Their username" value={newName} onChange={e=>setNewName(e.target.value)} required/></label><button className="primary" type="submit">Start chat</button></form>}<div className="sidebar-search"><Search size={16}/><input aria-label="Search conversations" placeholder="Search conversations" value={search} onChange={e=>setSearch(e.target.value)}/></div><div className="sidebar-section-label">CONVERSATIONS</div><div className="conversation-list">{conversations.length===0?<div className="empty-side">No conversations yet.<br/>Select + to begin.</div>:conversations.filter(c=>title(c).toLowerCase().includes(search.trim().toLowerCase())).map(c=><button key={c.id} className={"conversation "+(active===c.id?"active":"")} onClick={()=>setActive(c.id)}><span className="avatar">{title(c).slice(0,1).toUpperCase()}</span><span className="conversation-text"><strong>{title(c)}</strong><small>Direct conversation</small></span></button>)}</div><div className="user-panel"><span className="avatar me">{(profile||session.user.email||"U").slice(0,1).toUpperCase()}</span><div><strong>{profile||"Your account"}</strong><small><span className={"status-dot "+(connected?"online":"")}></span>{connected?"Connected":"Connecting…"}</small></div></div></aside><main className="chat-panel">{current?<><header className="chat-header"><span className="avatar">{title(current).slice(0,1).toUpperCase()}</span><div><h3>{title(current)}</h3><small>Direct conversation · Not end-to-end encrypted</small></div></header><div className="messages">{messages.length===0?<div className="welcome"><MessageCircle size={34}/><h2>Start the conversation</h2><p>Your messages will appear here.</p></div>:messages.map(m=><div key={m.id} className={"message-row "+(m.sender_id===session.user.id?"mine":"")}><div className="bubble">{m.body}<time>{new Date(m.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</time></div></div>)}<div ref={bottom}/></div><form className="composer" onSubmit={send}><input placeholder={"Message "+title(current)+"…"} value={draft} onChange={e=>setDraft(e.target.value)} maxLength={2000}/><button className="primary send" disabled={!draft.trim()||!connected} aria-label="Send message"><Send size={19}/></button></form></>:<div className="welcome"><span className="welcome-icon"><MessageCircle size={40}/></span><h1>Your workspace is ready</h1><p>Choose a conversation from the sidebar or start a new one.</p><button className="primary" onClick={()=>setCreating(true)}><Plus size={17}/> New conversation</button></div>}{error&&<div className="toast" role="alert">{error}<button onClick={()=>setError("")}>×</button></div>}</main></div>;
+  return <div className="shell"><aside className="sidebar"><div className="side-top"><div className="brand"><span className="brand-mark"><Layers3 size={19}/></span> Relay</div><div className="top-actions"><button className="icon-button" title="Profile settings" aria-label="Profile settings" onClick={()=>setShowProfile(true)}><Settings2 size={18}/></button><button className="icon-button" title="Sign out" onClick={()=>void supabase.auth.signOut()}><LogOut size={18}/></button></div></div><div className="side-heading"><div><h2>Inbox</h2><p className="muted">Direct conversations</p></div><button className="icon-button add" title="New chat" onClick={()=>setCreating(v=>!v)}><Plus size={20}/></button></div>{creating&&<form className="new-chat" onSubmit={startChat}><label>Start a conversation<input autoFocus placeholder="Their username" value={newName} onChange={e=>setNewName(e.target.value)} required/></label><button className="primary" type="submit">Start chat</button></form>}<div className="sidebar-search"><Search size={16}/><input aria-label="Search conversations" placeholder="Search conversations" value={search} onChange={e=>setSearch(e.target.value)}/></div><div className="sidebar-section-label">CONVERSATIONS</div><div className="conversation-list">{conversations.length===0?<div className="empty-side">No conversations yet.<br/>Select + to begin.</div>:conversations.filter(c=>title(c).toLowerCase().includes(search.trim().toLowerCase())).map(c=><button key={c.id} className={"conversation "+(active===c.id?"active":"")} onClick={()=>setActive(c.id)}><span className="avatar">{title(c).slice(0,1).toUpperCase()}</span><span className="conversation-text"><strong>{title(c)}</strong><small>Direct conversation</small></span></button>)}</div><div className="user-panel" onClick={()=>setShowProfile(true)} role="button" tabIndex={0} onKeyDown={e=>{if(e.key==="Enter")setShowProfile(true);}}><span className="avatar me">{(profile||session.user.email||"U").slice(0,1).toUpperCase()}</span><div><strong>{profile||"Your account"}</strong><small><span className={"status-dot "+(connected?"online":"")}></span>{connected?"Connected":"Connecting…"}</small></div></div></aside><main className="chat-panel">{current?<><header className="chat-header"><span className="avatar">{title(current).slice(0,1).toUpperCase()}</span><div><h3>{title(current)}</h3><small>Direct conversation · Not end-to-end encrypted</small></div><div className="header-actions"><button className="icon-button" aria-label="Search messages" title="Search messages" onClick={()=>setShowMessageSearch(v=>!v)}><Search size={19}/></button></div></header>{showMessageSearch&&<div className="message-search"><Search size={16}/><input autoFocus placeholder="Find in conversation…" value={messageSearch} onChange={e=>setMessageSearch(e.target.value)}/><button className="icon-button" title="Close search" onClick={()=>{setShowMessageSearch(false);setMessageSearch("");}}><X size={16}/></button></div>}<div className="messages">{visibleMessages.length===0?<div className="welcome"><MessageCircle size={34}/><h2>Start the conversation</h2><p>Your messages will appear here.</p></div>:visibleMessages.map(m=><div key={m.id} className={"message-row "+(m.sender_id===session.user.id?"mine":"")}><div className="bubble">{m.body}<time>{new Date(m.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</time></div></div>)}<div ref={bottom}/></div>{typingUsers.length>0&&<div className="typing-indicator"><span className="typing-dots"><i/><i/><i/></span> Typing…</div>}<form className="composer" onSubmit={send}><input placeholder={"Message "+title(current)+"…"} value={draft} onChange={e=>updateDraft(e.target.value)} maxLength={2000}/><button className="primary send" disabled={!draft.trim()||!connected} aria-label="Send message"><Send size={19}/></button></form></>:<div className="welcome"><span className="welcome-icon"><MessageCircle size={40}/></span><h1>Your workspace is ready</h1><p>Choose a conversation from the sidebar or start a new one.</p><button className="primary" onClick={()=>setCreating(true)}><Plus size={17}/> New conversation</button></div>}{!connected&&<div className="connection-banner"><WifiOff size={15}/> Reconnecting to real-time messaging…</div>}{error&&<div className="toast" role="alert">{error}<button onClick={()=>setError("")}>×</button></div>}</main>{showProfile&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setShowProfile(false);}}><section className="profile-modal" role="dialog" aria-modal="true" aria-label="Account settings"><div className="modal-heading"><div><span className="eyebrow">ACCOUNT</span><h2>Profile settings</h2></div><button className="icon-button" aria-label="Close" onClick={()=>setShowProfile(false)}><X size={19}/></button></div><div className="profile-summary"><span className="avatar me">{(profile||"U").slice(0,1).toUpperCase()}</span><div><strong>{profile||"Your account"}</strong><small>{session.user.email}</small></div></div><form onSubmit={saveProfile}><label>Username<input value={profileName} onChange={e=>setProfileName(e.target.value)} minLength={3} maxLength={24} pattern="[a-zA-Z0-9_]{3,24}" required/></label><p className="form-hint">3–24 letters, numbers or underscores. Other people use this to find you.</p><button className="primary full" disabled={savingProfile}><Check size={16}/>{savingProfile?"Saving…":"Save changes"}</button></form></section></div>}</div>;
 }
 export default function App() {
   const [session,setSession] = useState<Session|null>(null); const [loading,setLoading] = useState(true);
