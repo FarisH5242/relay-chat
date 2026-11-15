@@ -162,6 +162,12 @@ app.post("/api/messages/:id/reactions",guard,safe(async(req,res)=>{
  const rows=await admin.from("relay_reactions").select("user_id,emoji").eq("message_id",id);if(rows.error)throw rows.error;io.to("conversation:"+m.conversation_id).emit("reactions:changed",{id,conversationId:m.conversation_id,reactions:rows.data});res.json(rows.data);
 }));
 app.get("/api/calls",guard,safe(async(req,res)=>{const {data,error}=await admin.from("relay_call_history").select("id,caller,callee,video,started_at,accepted_at,ended_at,reason,caller_profile:profiles!relay_call_history_caller_fkey(username),callee_profile:profiles!relay_call_history_callee_fkey(username)").or("caller.eq."+req.userId+",callee.eq."+req.userId).order("ended_at",{ascending:false}).limit(100);if(error)throw error;res.json(data??[]);}));
+function isModerator(id:string){return (process.env.RELAY_MODERATOR_IDS||"").split(",").map(v=>v.trim()).includes(id);}
+app.get("/api/moderation/access",guard,safe(async(req,res)=>{res.json({allowed:isModerator(req.userId!)});}));
+app.get("/api/moderation/reports",guard,safe(async(req,res)=>{
+ if(!isModerator(req.userId!)){res.status(403).json({error:"Forbidden"});return;}
+ const {data,error}=await admin.from("relay_reports").select("id,reporter,reported,reason,created_at").order("created_at",{ascending:false}).limit(100);if(error)throw error;res.setHeader("Cache-Control","no-store");res.json(data??[]);
+}));
 app.get("/api/me/export",guard,safe(async(req,res)=>{
  const id=req.userId!;
  if(!limitRate("export:"+id,3,3600000)){res.status(429).json({error:"Export limit reached"});return;}
