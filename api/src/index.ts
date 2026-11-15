@@ -183,6 +183,16 @@ async function processScheduled(){if(processingScheduled)return;processingSchedu
  for(const job of data??[]){const result=await admin.rpc("relay_deliver_scheduled",{p_id:job.id});if(result.error){console.error(result.error.message);continue;}for(const m of result.data??[]){io.to("conversation:"+m.conversation_id).emit("message:new",m);const members=await admin.from("conversation_members").select("user_id").eq("conversation_id",m.conversation_id);for(const u of members.data??[])io.to("user:"+u.user_id).emit("conversation:activity",{conversationId:m.conversation_id,senderId:m.sender_id});}}
  }catch(e){console.error("Scheduled delivery",e);}finally{processingScheduled=false;}}
 setInterval(()=>void processScheduled(),15000);
+app.patch("/api/conversations/:id/expiry",guard,safe(async(req,res)=>{
+ const id=z.string().uuid().parse(req.params.id);const seconds=z.number().int().refine(v=>[0,300,3600,86400,604800].includes(v)).parse(req.body.seconds);
+ if(!await member(id,req.userId!)||!await canContactConversation(id,req.userId!)){res.status(403).json({error:"Contact unavailable"});return;}
+ const {data,error}=await admin.from("conversations").update({disappear_seconds:seconds}).eq("id",id).is("name",null).select("id");if(error)throw error;if(!data?.length){res.status(400).json({error:"Timers are available in private chats only"});return;}
+ const members=await admin.from("conversation_members").select("user_id").eq("conversation_id",id);for(const m of members.data??[])io.to("user:"+m.user_id).emit("profiles:updated");res.json({ok:true});
+}));
+let expiring=false;
+async function expireMessages(){if(expiring)return;expiring=true;try{const now=new Date().toISOString();const {data,error}=await admin.from("messages").select("id").lte("expires_at",now).limit(200);if(error)throw error;const ids=(data??[]).map(m=>m.id);if(!ids.length)return;const deleted=await admin.from("messages").delete().in("id",ids).lte("expires_at",now).select("id,conversation_id");if(deleted.error)throw deleted.error;for(const m of deleted.data??[]){io.to("conversation:"+m.conversation_id).emit("message:deleted",m);const members=await admin.from("conversation_members").select("user_id").eq("conversation_id",m.conversation_id);for(const u of members.data??[])io.to("user:"+u.user_id).emit("profiles:updated");}}catch(e){console.error("Expiry",e);}finally{expiring=false;}}
+setInterval(()=>void expireMessages(),15000);
+
 app.get("/api/me/export",guard,safe(async(req,res)=>{
  const id=req.userId!;
  if(!limitRate("export:"+id,3,3600000)){res.status(429).json({error:"Export limit reached"});return;}
@@ -230,11 +240,11 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   if (!ids.length) { res.json([]); return; }
   const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path,bio,status,hide_online,read_receipts)").in("conversation_id",ids);
   if (e) throw e;
-  const {data:details,error:de}=await admin.from("conversations").select("id,name").in("id",ids);
+  const {data:details,error:de}=await admin.from("conversations").select("id,name,disappear_seconds").in("id",ids);
   if(de)throw de;
-  const previews=await Promise.all(ids.map(async id=>{const {data}=await admin.from("messages").select("id,body,created_at,sender_id,attachment_name").eq("conversation_id",id).order("created_at",{ascending:false}).limit(1).maybeSingle();return [id,data] as const;}));
+  const previews=await Promise.all(ids.map(async id=>{const {data}=await admin.from("messages").select("id,body,created_at,sender_id,attachment_name").eq("conversation_id",id).or("expires_at.is.null,expires_at.gt."+new Date().toISOString()).order("created_at",{ascending:false}).limit(1).maybeSingle();return [id,data] as const;}));
   const latest=new Map(previews);
-  res.json(ids.map(id => ({ id, latest:latest.get(id)??null, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:(m.user_id===req.userId||(m.profiles as any)?.read_receipts!==false)?m.last_read_at??null:null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:(!(m.profiles as any)?.hide_online||m.user_id===req.userId)&&io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
+  res.json(ids.map(id => ({ id, latest:latest.get(id)??null, disappear_seconds:details?.find(d=>d.id===id)?.disappear_seconds??0, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:(m.user_id===req.userId||(m.profiles as any)?.read_receipts!==false)?m.last_read_at??null:null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:(!(m.profiles as any)?.hide_online||m.user_id===req.userId)&&io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
   const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional() }).safeParse(req.body);
@@ -273,7 +283,7 @@ app.post("/api/conversations",guard,safe(async(req,res) => {
 app.get("/api/conversations/:id/messages",guard,safe(async(req,res) => {
   const id = z.string().uuid().parse(req.params.id);
   if (!(await member(id,req.userId!))) { res.status(403).json({error:"Forbidden"}); return; }
-  const {data,error} = await admin.from("messages").select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name,reply_to,reactions:relay_reactions(user_id,emoji)").eq("conversation_id",id).order("created_at",{ascending:false}).limit(100);
+  const {data,error} = await admin.from("messages").select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name,reply_to,expires_at,reactions:relay_reactions(user_id,emoji)").eq("conversation_id",id).or("expires_at.is.null,expires_at.gt."+new Date().toISOString()).order("created_at",{ascending:false}).limit(100);
   if (error) throw error;
   res.json((data ?? []).reverse());
 }));
@@ -308,7 +318,7 @@ app.patch("/api/messages/:id",guard,safe(async(req,res) => {
   if (lookupError) throw lookupError;
   if (!existing) { res.status(404).json({error:"Message not found"}); return; }
   if (existing.sender_id!==req.userId || !(await member(existing.conversation_id,req.userId!))) {res.status(403).json({error:"You can only edit your own messages"});return;}
-  const {data,error}=await admin.from("messages").update({body:parsed.data.body}).eq("id",id).eq("sender_id",req.userId!).select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name,reply_to,reactions:relay_reactions(user_id,emoji)").single();
+  const {data,error}=await admin.from("messages").update({body:parsed.data.body}).eq("id",id).eq("sender_id",req.userId!).select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name,reply_to,expires_at,reactions:relay_reactions(user_id,emoji)").single();
   if(error)throw error;
   io.to("conversation:"+existing.conversation_id).emit("message:updated",data);
   res.json(data);
@@ -375,7 +385,7 @@ io.on("connection",socket => {
       if(!(await canContactConversation(conversationId,userId))){ack?.({ok:false,error:"Contact unavailable"});return;}
       if(!limitRate("send:"+userId,30,60*1000)){ack?.({ok:false,error:"You are sending messages too quickly. Please wait a minute."});return;}
       if(replyTo){const {data:parent}=await admin.from("messages").select("id").eq("id",replyTo).eq("conversation_id",conversationId).maybeSingle();if(!parent)throw Error("Invalid reply");}
-      const {data,error} = await admin.from("messages").insert({conversation_id:conversationId,sender_id:userId,body,reply_to:replyTo}).select("id,conversation_id,sender_id,body,created_at,reply_to").single();
+      const {data,error} = await admin.from("messages").insert({conversation_id:conversationId,sender_id:userId,body,reply_to:replyTo}).select("id,conversation_id,sender_id,body,created_at,reply_to,expires_at").single();
       if (error) throw error;
       io.to("conversation:"+conversationId).emit("message:new",data);
       const {data:members} = await admin.from("conversation_members").select("user_id").eq("conversation_id",conversationId);
