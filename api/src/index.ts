@@ -93,6 +93,12 @@ async function member(conversationId: string, userId: string) {
   if (error) throw error;
   return !!data;
 }
+async function blockedPair(a:string,b:string){const {data,error}=await admin.from("relay_blocks").select("blocker").or("and(blocker.eq."+a+",blocked.eq."+b+"),and(blocker.eq."+b+",blocked.eq."+a+")").limit(1);if(error)throw error;return !!data?.length;}
+async function canContactConversation(id:string,userId:string){const {data,error}=await admin.from("conversation_members").select("user_id").eq("conversation_id",id);if(error)throw error;return !(await Promise.all((data??[]).filter(m=>m.user_id!==userId).map(m=>blockedPair(userId,m.user_id)))).some(Boolean);}
+app.get("/api/blocks",guard,safe(async(req,res)=>{const {data,error}=await admin.from("relay_blocks").select("blocked,profiles!relay_blocks_blocked_fkey(username)").eq("blocker",req.userId!);if(error)throw error;res.json(data??[]);}));
+app.post("/api/blocks",guard,safe(async(req,res)=>{const id=z.string().uuid().parse(req.body.id);if(id===req.userId){res.status(400).json({error:"Cannot block yourself"});return;}const {error}=await admin.from("relay_blocks").upsert({blocker:req.userId,blocked:id});if(error)throw error;for(const call of calls.values())if([call.caller,call.callee].includes(id)&&[call.caller,call.callee].includes(req.userId!))endCall(call,"Call ended");res.json({ok:true});}));
+app.delete("/api/blocks/:id",guard,safe(async(req,res)=>{const id=z.string().uuid().parse(req.params.id);const {error}=await admin.from("relay_blocks").delete().eq("blocker",req.userId!).eq("blocked",id);if(error)throw error;res.json({ok:true});}));
+app.post("/api/reports",guard,safe(async(req,res)=>{const {id,reason}=z.object({id:z.string().uuid(),reason:z.string().trim().min(5).max(1000)}).parse(req.body);if(id===req.userId){res.status(400).json({error:"Cannot report yourself"});return;}if(!limitRate("report:"+req.userId,5,3600000)){res.status(429).json({error:"Report limit reached"});return;}const {error}=await admin.from("relay_reports").insert({reporter:req.userId,reported:id,reason});if(error)throw error;res.json({ok:true});}));
 app.get("/health",(_req,res) => res.json({ ok:true }));
 app.get("/api/files",guard,safe(async(req,res) => {
   const path=z.string().min(1).max(250).parse(req.query.path);
@@ -136,6 +142,7 @@ app.get("/api/friends",guard,safe(async(req,res)=>{
 app.post("/api/friends",guard,safe(async(req,res)=>{
  const id=z.string().uuid().parse(req.body.id);if(id===req.userId){res.status(400).json({error:"Cannot add yourself"});return;}
  if(!limitRate("friend:"+req.userId,30,3600000)){res.status(429).json({error:"Too many requests"});return;}
+ if(await blockedPair(req.userId!,id)){res.status(403).json({error:"Contact unavailable"});return;}
  const preference=await admin.from("profiles").select("allow_friend_requests").eq("id",id).single();if(preference.error)throw preference.error;if(!preference.data.allow_friend_requests){res.status(403).json({error:"This user is not accepting friend requests"});return;}
  const {error}=await admin.from("relay_friends").insert({requester:req.userId,recipient:id});if(error&&error.code!=="23505")throw error;
  io.to("user:"+id).emit("friends:changed");res.json({ok:true});
@@ -155,15 +162,15 @@ app.post("/api/messages/:id/reactions",guard,safe(async(req,res)=>{
  const rows=await admin.from("relay_reactions").select("user_id,emoji").eq("message_id",id);if(rows.error)throw rows.error;io.to("conversation:"+m.conversation_id).emit("reactions:changed",{id,conversationId:m.conversation_id,reactions:rows.data});res.json(rows.data);
 }));
 app.get("/api/me",guard,safe(async(req,res) => {
-  const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at,bio,status,hide_online,allow_calls,allow_friend_requests").eq("id",req.userId!).maybeSingle();
+  const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at,bio,status,hide_online,allow_calls,allow_friend_requests,read_receipts").eq("id",req.userId!).maybeSingle();
   if (error) throw error;
   if (!data) { res.status(404).json({error:"Profile missing. Run the profile backfill migration in Supabase."}); return; }
   res.json(data);
 }));
 app.patch("/api/me",guard,safe(async(req,res) => {
-  const parsed = z.object({username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional(),hide_online:z.boolean().optional(),allow_calls:z.boolean().optional(),allow_friend_requests:z.boolean().optional()}).safeParse(req.body);
+  const parsed = z.object({username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional(),hide_online:z.boolean().optional(),allow_calls:z.boolean().optional(),allow_friend_requests:z.boolean().optional(),read_receipts:z.boolean().optional()}).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({error:"Username must be 3–24 letters, numbers or underscores."}); return; }
-  const {data,error} = await admin.from("profiles").update({username:parsed.data.username,bio:parsed.data.bio,status:parsed.data.status,hide_online:parsed.data.hide_online,allow_calls:parsed.data.allow_calls,allow_friend_requests:parsed.data.allow_friend_requests}).eq("id",req.userId!).select("id,username,bio,status").single();
+  const {data,error} = await admin.from("profiles").update({username:parsed.data.username,bio:parsed.data.bio,status:parsed.data.status,hide_online:parsed.data.hide_online,allow_calls:parsed.data.allow_calls,allow_friend_requests:parsed.data.allow_friend_requests,read_receipts:parsed.data.read_receipts}).eq("id",req.userId!).select("id,username,bio,status").single();
   if (error) {
     if (error.code === "23505") { res.status(409).json({error:"That username is already taken."}); return; }
     throw error;
@@ -191,13 +198,13 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   if (error) throw error;
   const ids = (mine ?? []).map(m => m.conversation_id);
   if (!ids.length) { res.json([]); return; }
-  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path,bio,status,hide_online)").in("conversation_id",ids);
+  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path,bio,status,hide_online,read_receipts)").in("conversation_id",ids);
   if (e) throw e;
   const {data:details,error:de}=await admin.from("conversations").select("id,name").in("id",ids);
   if(de)throw de;
   const previews=await Promise.all(ids.map(async id=>{const {data}=await admin.from("messages").select("id,body,created_at,sender_id,attachment_name").eq("conversation_id",id).order("created_at",{ascending:false}).limit(1).maybeSingle();return [id,data] as const;}));
   const latest=new Map(previews);
-  res.json(ids.map(id => ({ id, latest:latest.get(id)??null, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:(!(m.profiles as any)?.hide_online||m.user_id===req.userId)&&io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
+  res.json(ids.map(id => ({ id, latest:latest.get(id)??null, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:(m.user_id===req.userId||(m.profiles as any)?.read_receipts!==false)?m.last_read_at??null:null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:(!(m.profiles as any)?.hide_online||m.user_id===req.userId)&&io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
   const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional() }).safeParse(req.body);
@@ -243,6 +250,7 @@ app.get("/api/conversations/:id/messages",guard,safe(async(req,res) => {
 app.post("/api/conversations/:id/attachments",guard,safe(async(req,res) => {
   const id=z.string().uuid().parse(req.params.id);
   if(!(await member(id,req.userId!))){res.status(403).json({error:"Forbidden"});return;}
+  if(!(await canContactConversation(id,req.userId!))){res.status(403).json({error:"Contact unavailable"});return;}
   if(!limitRate("upload:"+req.userId,20,60*60*1000)){res.status(429).json({error:"Upload limit reached. Try again later."});return;}
   try{
     const file=await storeFile(req.userId!,"attachments",req.body);
@@ -259,7 +267,7 @@ app.post("/api/conversations/:id/read",guard,safe(async(req,res) => {
   if(!(await member(id,req.userId!))){res.status(403).json({error:"Forbidden"});return;}
   const {error}=await admin.from("conversation_members").update({last_read_at:new Date().toISOString()}).eq("conversation_id",id).eq("user_id",req.userId!);
   if(error)throw error;
-  io.to("conversation:"+id).emit("conversation:read",{conversationId:id,userId:req.userId,at:new Date().toISOString()});
+  const pref=await admin.from("profiles").select("read_receipts").eq("id",req.userId!).single();if(pref.error)throw pref.error;const receipt={conversationId:id,userId:req.userId,at:new Date().toISOString()};if(pref.data.read_receipts)io.to("conversation:"+id).emit("conversation:read",receipt);else io.to("user:"+req.userId).emit("conversation:read",receipt);
   res.json({ok:true});
 }));
 app.patch("/api/messages/:id",guard,safe(async(req,res) => {
@@ -306,6 +314,7 @@ io.on("connection",socket => {
       if(error||members?.length!==2)throw Error("Calls require a private chat");
       const other=members.find(m=>m.user_id!==userId)?.user_id;
       if(!other||!io.sockets.adapter.rooms.get("user:"+other)?.size)throw Error("Contact is offline");
+      if(await blockedPair(userId,other))throw Error("Contact unavailable");
       const preference=await admin.from("profiles").select("allow_calls").eq("id",other).single();if(preference.error||!preference.data.allow_calls)throw Error("Contact is not accepting calls");
       if(calls.has(id)||[...calls.values()].some(c=>[c.caller,c.callee].some(u=>u===userId||u===other)))throw Error("Contact is busy");
       const call:RelayCall={id,caller:userId,callee:other,callerSocket:socket.id,timer:setTimeout(()=>{const c=calls.get(id);if(c)endCall(c,"No answer");},45000)};
@@ -325,6 +334,7 @@ io.on("connection",socket => {
     if (!parsed.success) return;
     try {
       if (!(await member(parsed.data.conversationId,userId))) return;
+      if(!(await canContactConversation(parsed.data.conversationId,userId)))return;
       socket.to("conversation:"+parsed.data.conversationId).emit("typing", {conversationId:parsed.data.conversationId,userId,isTyping:parsed.data.isTyping});
     } catch { /* Ignore invalid typing updates. */ }
   });
@@ -332,6 +342,7 @@ io.on("connection",socket => {
     try {
       const {conversationId,body,replyTo} = z.object({conversationId:z.string().uuid(),body:z.string().trim().min(1).max(2000),replyTo:z.string().uuid().optional()}).parse(payload);
       if (!(await member(conversationId,userId))) throw Error();
+      if(!(await canContactConversation(conversationId,userId))){ack?.({ok:false,error:"Contact unavailable"});return;}
       if(!limitRate("send:"+userId,30,60*1000)){ack?.({ok:false,error:"You are sending messages too quickly. Please wait a minute."});return;}
       if(replyTo){const {data:parent}=await admin.from("messages").select("id").eq("id",replyTo).eq("conversation_id",conversationId).maybeSingle();if(!parent)throw Error("Invalid reply");}
       const {data,error} = await admin.from("messages").insert({conversation_id:conversationId,sender_id:userId,body,reply_to:replyTo}).select("id,conversation_id,sender_id,body,created_at,reply_to").single();
