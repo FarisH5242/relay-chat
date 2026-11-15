@@ -33,6 +33,8 @@ const corsOptions = {
     callback(new Error("Origin not allowed: " + origin));
   }
 };
+app.disable("x-powered-by");
+app.use((_req,res,next)=>{res.setHeader("X-Content-Type-Options","nosniff");res.setHeader("Referrer-Policy","no-referrer");res.setHeader("Cache-Control","no-store");next();});
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "3mb" }));
 const server = createServer(app);
@@ -193,6 +195,22 @@ let expiring=false;
 async function expireMessages(){if(expiring)return;expiring=true;try{const now=new Date().toISOString();const {data,error}=await admin.from("messages").select("id").lte("expires_at",now).limit(200);if(error)throw error;const ids=(data??[]).map(m=>m.id);if(!ids.length)return;const deleted=await admin.from("messages").delete().in("id",ids).lte("expires_at",now).select("id,conversation_id");if(deleted.error)throw deleted.error;for(const m of deleted.data??[]){io.to("conversation:"+m.conversation_id).emit("message:deleted",m);const members=await admin.from("conversation_members").select("user_id").eq("conversation_id",m.conversation_id);for(const u of members.data??[])io.to("user:"+u.user_id).emit("profiles:updated");}}catch(e){console.error("Expiry",e);}finally{expiring=false;}}
 setInterval(()=>void expireMessages(),15000);
 
+app.post("/api/me/delete",guard,safe(async(req,res)=>{
+ const id=req.userId!;const password=z.string().min(1).max(1024).parse(req.body.password);
+ if(!limitRate("delete:"+id,3,3600000)){res.status(429).json({error:"Try again later"});return;}
+ const user=await admin.auth.admin.getUserById(id);if(user.error||!user.data.user?.email){res.status(400).json({error:"Password verification unavailable"});return;}
+ const verifier=createClient(supabaseUrl,process.env.SUPABASE_ANON_KEY!,{auth:{persistSession:false,autoRefreshToken:false}});
+ const check=await verifier.auth.signInWithPassword({email:user.data.user.email,password});
+ if(check.error||check.data.user?.id!==id){res.status(403).json({error:"Incorrect password"});return;}
+ await verifier.auth.signOut({scope:"local"});
+ const memberships=await admin.from("conversation_members").select("conversation_id").eq("user_id",id);if(memberships.error)throw memberships.error;
+ for(const call of calls.values())if(call.caller===id||call.callee===id)endCall(call,"Call ended");
+ io.in("user:"+id).disconnectSockets(true);
+ for(;;){const files=await admin.storage.from("relay-files").list(id,{limit:100});if(files.error)throw files.error;if(!files.data?.length)break;const removed=await admin.storage.from("relay-files").remove(files.data.map(file=>id+"/"+file.name));if(removed.error)throw removed.error;}
+ const deleted=await admin.auth.admin.deleteUser(id);if(deleted.error)throw deleted.error;
+ for(const m of memberships.data??[]){io.to("conversation:"+m.conversation_id).emit("profiles:updated");}
+ res.json({ok:true});
+}));
 app.get("/api/me/export",guard,safe(async(req,res)=>{
  const id=req.userId!;
  if(!limitRate("export:"+id,3,3600000)){res.status(429).json({error:"Export limit reached"});return;}
