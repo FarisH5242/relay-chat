@@ -127,6 +127,32 @@ app.get("/api/users/search",guard,safe(async(req,res)=>{
  if(error)throw error;
  res.json(data??[]);
 }));
+app.get("/api/friends",guard,safe(async(req,res)=>{
+ const {data,error}=await admin.from("relay_friends").select("*").or("requester.eq."+req.userId+",recipient.eq."+req.userId);if(error)throw error;
+ const ids=(data??[]).map(x=>x.requester===req.userId?x.recipient:x.requester);
+ const people=ids.length?await admin.from("profiles").select("id,username,avatar_path").in("id",ids):{data:[],error:null};if(people.error)throw people.error;
+ res.json((data??[]).map(x=>({...x,person:people.data?.find(p=>p.id===(x.requester===req.userId?x.recipient:x.requester))})));
+}));
+app.post("/api/friends",guard,safe(async(req,res)=>{
+ const id=z.string().uuid().parse(req.body.id);if(id===req.userId){res.status(400).json({error:"Cannot add yourself"});return;}
+ if(!limitRate("friend:"+req.userId,30,3600000)){res.status(429).json({error:"Too many requests"});return;}
+ const {error}=await admin.from("relay_friends").insert({requester:req.userId,recipient:id});if(error&&error.code!=="23505")throw error;
+ io.to("user:"+id).emit("friends:changed");res.json({ok:true});
+}));
+app.patch("/api/friends/:id",guard,safe(async(req,res)=>{
+ const id=z.string().uuid().parse(req.params.id);const {error}=await admin.from("relay_friends").update({accepted:true}).eq("requester",id).eq("recipient",req.userId!);if(error)throw error;io.to("user:"+id).emit("friends:changed");res.json({ok:true});
+}));
+app.delete("/api/friends/:id",guard,safe(async(req,res)=>{
+ const id=z.string().uuid().parse(req.params.id);const {error}=await admin.from("relay_friends").delete().or("and(requester.eq."+req.userId+",recipient.eq."+id+"),and(requester.eq."+id+",recipient.eq."+req.userId+")");if(error)throw error;io.to("user:"+id).emit("friends:changed");res.json({ok:true});
+}));
+app.post("/api/messages/:id/reactions",guard,safe(async(req,res)=>{
+ const id=z.string().uuid().parse(req.params.id);const emoji=z.enum(["👍","❤️","😂","🔥","🎉","😮"]).parse(req.body.emoji);
+ const {data:m,error}=await admin.from("messages").select("conversation_id").eq("id",id).single();if(error)throw error;if(!await member(m.conversation_id,req.userId!)){res.status(403).json({error:"Forbidden"});return;}
+ if(!limitRate("reaction:"+req.userId,120,60000)){res.status(429).json({error:"Too many reactions"});return;}
+ const q=admin.from("relay_reactions");const {data:existing,error:e}=await q.select("message_id").eq("message_id",id).eq("user_id",req.userId!).eq("emoji",emoji).maybeSingle();if(e)throw e;
+ const result=existing?await admin.from("relay_reactions").delete().eq("message_id",id).eq("user_id",req.userId!).eq("emoji",emoji):await admin.from("relay_reactions").insert({message_id:id,user_id:req.userId,emoji});if(result.error)throw result.error;
+ const rows=await admin.from("relay_reactions").select("user_id,emoji").eq("message_id",id);if(rows.error)throw rows.error;io.to("conversation:"+m.conversation_id).emit("reactions:changed",{id,conversationId:m.conversation_id,reactions:rows.data});res.json(rows.data);
+}));
 app.get("/api/me",guard,safe(async(req,res) => {
   const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at,bio,status").eq("id",req.userId!).maybeSingle();
   if (error) throw error;
@@ -207,7 +233,7 @@ app.post("/api/conversations",guard,safe(async(req,res) => {
 app.get("/api/conversations/:id/messages",guard,safe(async(req,res) => {
   const id = z.string().uuid().parse(req.params.id);
   if (!(await member(id,req.userId!))) { res.status(403).json({error:"Forbidden"}); return; }
-  const {data,error} = await admin.from("messages").select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name").eq("conversation_id",id).order("created_at",{ascending:false}).limit(100);
+  const {data,error} = await admin.from("messages").select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name,reply_to,reactions:relay_reactions(user_id,emoji)").eq("conversation_id",id).order("created_at",{ascending:false}).limit(100);
   if (error) throw error;
   res.json((data ?? []).reverse());
 }));
@@ -241,7 +267,7 @@ app.patch("/api/messages/:id",guard,safe(async(req,res) => {
   if (lookupError) throw lookupError;
   if (!existing) { res.status(404).json({error:"Message not found"}); return; }
   if (existing.sender_id!==req.userId || !(await member(existing.conversation_id,req.userId!))) {res.status(403).json({error:"You can only edit your own messages"});return;}
-  const {data,error}=await admin.from("messages").update({body:parsed.data.body}).eq("id",id).eq("sender_id",req.userId!).select("id,conversation_id,sender_id,body,created_at").single();
+  const {data,error}=await admin.from("messages").update({body:parsed.data.body}).eq("id",id).eq("sender_id",req.userId!).select("id,conversation_id,sender_id,body,created_at,attachment_path,attachment_name,reply_to,reactions:relay_reactions(user_id,emoji)").single();
   if(error)throw error;
   io.to("conversation:"+existing.conversation_id).emit("message:updated",data);
   res.json(data);
@@ -280,10 +306,11 @@ io.on("connection",socket => {
   });
   socket.on("message:send",async(payload:unknown,ack?: (result:{ok:boolean;error?:string})=>void) => {
     try {
-      const {conversationId,body} = z.object({conversationId:z.string().uuid(),body:z.string().trim().min(1).max(2000)}).parse(payload);
+      const {conversationId,body,replyTo} = z.object({conversationId:z.string().uuid(),body:z.string().trim().min(1).max(2000),replyTo:z.string().uuid().optional()}).parse(payload);
       if (!(await member(conversationId,userId))) throw Error();
       if(!limitRate("send:"+userId,30,60*1000)){ack?.({ok:false,error:"You are sending messages too quickly. Please wait a minute."});return;}
-      const {data,error} = await admin.from("messages").insert({conversation_id:conversationId,sender_id:userId,body}).select("id,conversation_id,sender_id,body,created_at").single();
+      if(replyTo){const {data:parent}=await admin.from("messages").select("id").eq("id",replyTo).eq("conversation_id",conversationId).maybeSingle();if(!parent)throw Error("Invalid reply");}
+      const {data,error} = await admin.from("messages").insert({conversation_id:conversationId,sender_id:userId,body,reply_to:replyTo}).select("id,conversation_id,sender_id,body,created_at,reply_to").single();
       if (error) throw error;
       io.to("conversation:"+conversationId).emit("message:new",data);
       const {data:members} = await admin.from("conversation_members").select("user_id").eq("conversation_id",conversationId);
