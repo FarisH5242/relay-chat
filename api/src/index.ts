@@ -157,7 +157,11 @@ app.post("/api/conversations",guard,safe(async(req,res) => {
   if (e) throw e;
   if (!target) { res.status(404).json({error:"Username not found"}); return; }
   if (target.id === req.userId) { res.status(400).json({error:"Cannot chat with yourself"}); return; }
-  const { data: mine } = await admin.from("conversation_members").select("conversation_id").eq("user_id",req.userId!);
+  const { data: ownProfile, error: profileError } = await admin.from("profiles").select("id").eq("id",req.userId!).maybeSingle();
+  if (profileError) throw profileError;
+  if (!ownProfile) { res.status(409).json({error:"Your Relay profile is missing. Apply the account repair SQL in Supabase."}); return; }
+  const { data: mine, error: mineError } = await admin.from("conversation_members").select("conversation_id").eq("user_id",req.userId!);
+  if (mineError) throw mineError;
   const ids = (mine ?? []).map(m => m.conversation_id);
   if (ids.length) {
     const { data: shared } = await admin.from("conversation_members").select("conversation_id").eq("user_id",target.id).in("conversation_id",ids);
@@ -169,7 +173,10 @@ app.post("/api/conversations",guard,safe(async(req,res) => {
   const { data: conversation, error } = await admin.from("conversations").insert({}).select("id").single();
   if (error) throw error;
   const { error: memberError } = await admin.from("conversation_members").insert([{conversation_id:conversation.id,user_id:req.userId!},{conversation_id:conversation.id,user_id:target.id}]);
-  if (memberError) throw memberError;
+  if (memberError) {
+    await admin.from("conversations").delete().eq("id",conversation.id);
+    throw memberError;
+  }
   io.to("user:"+target.id).emit("conversations:refresh");
   res.status(201).json(conversation);
 }));
@@ -261,6 +268,9 @@ io.on("connection",socket => {
 });
 app.use((error:unknown,_req:Request,res:Response,_next:NextFunction) => {
   if (error instanceof z.ZodError) { res.status(400).json({error:"Invalid input"}); return; }
-  console.error(error); res.status(500).json({error:"Internal server error"});
+  console.error(error);
+  const code = (error as {code?:string}|null)?.code;
+  if (code === "42703" || code === "PGRST204" || code === "PGRST200" || code === "PGRST205") { res.status(503).json({error:"Database schema is not up to date. Run the Relay files and receipts migration in Supabase, then retry."}); return; }
+  res.status(500).json({error:"Internal server error. Check the relay-api Render logs for details."});
 });
 server.listen(Number(process.env.PORT ?? 4000),"0.0.0.0",()=>console.log("Relay API running"));
