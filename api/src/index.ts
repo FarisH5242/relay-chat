@@ -120,16 +120,23 @@ app.post("/api/me/avatar",guard,safe(async(req,res) => {
     res.json({path:file.path,url:await signedFile(file.path)});
   }catch(e){res.status(400).json({error:(e as Error).message});}
 }));
+app.get("/api/users/search",guard,safe(async(req,res)=>{
+ const q=z.string().trim().toLowerCase().regex(/^[a-z0-9_]{2,24}$/).parse(req.query.q);
+ if(!limitRate("search:"+req.userId,90,60000)){res.status(429).json({error:"Search limit reached"});return;}
+ const {data,error}=await admin.from("profiles").select("id,username,avatar_path").ilike("username",q.replace(/_/g,"\\_")+"%").neq("id",req.userId!).order("username").limit(15);
+ if(error)throw error;
+ res.json(data??[]);
+}));
 app.get("/api/me",guard,safe(async(req,res) => {
-  const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at").eq("id",req.userId!).maybeSingle();
+  const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at,bio,status").eq("id",req.userId!).maybeSingle();
   if (error) throw error;
   if (!data) { res.status(404).json({error:"Profile missing. Run the profile backfill migration in Supabase."}); return; }
   res.json(data);
 }));
 app.patch("/api/me",guard,safe(async(req,res) => {
-  const parsed = z.object({username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/)}).safeParse(req.body);
+  const parsed = z.object({username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional()}).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({error:"Username must be 3–24 letters, numbers or underscores."}); return; }
-  const {data,error} = await admin.from("profiles").update({username:parsed.data.username}).eq("id",req.userId!).select("id,username").single();
+  const {data,error} = await admin.from("profiles").update({username:parsed.data.username,bio:parsed.data.bio,status:parsed.data.status}).eq("id",req.userId!).select("id,username,bio,status").single();
   if (error) {
     if (error.code === "23505") { res.status(409).json({error:"That username is already taken."}); return; }
     throw error;
@@ -157,14 +164,14 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   if (error) throw error;
   const ids = (mine ?? []).map(m => m.conversation_id);
   if (!ids.length) { res.json([]); return; }
-  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path)").in("conversation_id",ids);
+  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path,bio,status)").in("conversation_id",ids);
   if (e) throw e;
   const {data:details,error:de}=await admin.from("conversations").select("id,name").in("id",ids);
   if(de)throw de;
-  res.json(ids.map(id => ({ id, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null, online:io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
+  res.json(ids.map(id => ({ id, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
-  const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/) }).safeParse(req.body);
+  const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional() }).safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({error:"Enter the Relay username (not an email): 3–24 lowercase letters, numbers or underscores. Check the username in Supabase public.profiles."});
     return;
@@ -214,7 +221,7 @@ app.post("/api/conversations/:id/attachments",guard,safe(async(req,res) => {
     if(error)throw error;
     io.to("conversation:"+id).emit("message:new",data);
     const {data:members}=await admin.from("conversation_members").select("user_id").eq("conversation_id",id);
-    for(const m of members??[])io.to("user:"+m.user_id).emit("conversation:activity",{conversationId:id});
+    for(const m of members??[])io.to("user:"+m.user_id).emit("conversation:activity",{conversationId:id,senderId:req.userId});
     res.status(201).json(data);
   }catch(e){res.status(400).json({error:(e as Error).message});}
 }));
@@ -280,7 +287,7 @@ io.on("connection",socket => {
       if (error) throw error;
       io.to("conversation:"+conversationId).emit("message:new",data);
       const {data:members} = await admin.from("conversation_members").select("user_id").eq("conversation_id",conversationId);
-      for (const m of members ?? []) io.to("user:"+m.user_id).emit("conversation:activity",{conversationId});
+      for (const m of members ?? []) io.to("user:"+m.user_id).emit("conversation:activity",{conversationId,senderId:userId});
       ack?.({ok:true});
     } catch { ack?.({ok:false,error:"Could not send message"}); }
   });
