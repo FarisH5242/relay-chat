@@ -161,6 +161,7 @@ app.post("/api/messages/:id/reactions",guard,safe(async(req,res)=>{
  const result=existing?await admin.from("relay_reactions").delete().eq("message_id",id).eq("user_id",req.userId!).eq("emoji",emoji):await admin.from("relay_reactions").insert({message_id:id,user_id:req.userId,emoji});if(result.error)throw result.error;
  const rows=await admin.from("relay_reactions").select("user_id,emoji").eq("message_id",id);if(rows.error)throw rows.error;io.to("conversation:"+m.conversation_id).emit("reactions:changed",{id,conversationId:m.conversation_id,reactions:rows.data});res.json(rows.data);
 }));
+app.get("/api/calls",guard,safe(async(req,res)=>{const {data,error}=await admin.from("relay_call_history").select("id,caller,callee,video,started_at,accepted_at,ended_at,reason,caller_profile:profiles!relay_call_history_caller_fkey(username),callee_profile:profiles!relay_call_history_callee_fkey(username)").or("caller.eq."+req.userId+",callee.eq."+req.userId).order("ended_at",{ascending:false}).limit(100);if(error)throw error;res.json(data??[]);}));
 app.get("/api/me",guard,safe(async(req,res) => {
   const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at,bio,status,hide_online,allow_calls,allow_friend_requests,read_receipts").eq("id",req.userId!).maybeSingle();
   if (error) throw error;
@@ -298,9 +299,9 @@ io.use(async(socket,next) => {
   try { if (typeof socket.handshake.auth.token !== "string") throw Error(); socket.data.userId = await userFor(socket.handshake.auth.token); next(); }
   catch { next(Error("Unauthorized")); }
 });
-type RelayCall={id:string;caller:string;callee:string;callerSocket:string;calleeSocket?:string;timer:ReturnType<typeof setTimeout>};
+type RelayCall={id:string;video:boolean;startedAt:string;acceptedAt?:string;caller:string;callee:string;callerSocket:string;calleeSocket?:string;timer:ReturnType<typeof setTimeout>};
 const calls=new Map<string,RelayCall>();
-function endCall(call:RelayCall,reason:string){clearTimeout(call.timer);calls.delete(call.id);io.to("user:"+call.caller).to("user:"+call.callee).emit("call:ended",{id:call.id,reason});}
+function endCall(call:RelayCall,reason:string){if(!calls.delete(call.id))return;clearTimeout(call.timer);void Promise.resolve(admin.from("relay_call_history").insert({id:call.id,caller:call.caller,callee:call.callee,video:call.video,started_at:call.startedAt,accepted_at:call.acceptedAt??null,ended_at:new Date().toISOString(),reason})).then(({error})=>{if(error)console.error("Call history write failed",error.message);}).catch(console.error);io.to("user:"+call.caller).to("user:"+call.callee).emit("call:ended",{id:call.id,reason});}
 io.on("connection",socket => {
   const userId = socket.data.userId as string;
   socket.join("user:"+userId);
@@ -317,11 +318,11 @@ io.on("connection",socket => {
       if(await blockedPair(userId,other))throw Error("Contact unavailable");
       const preference=await admin.from("profiles").select("allow_calls").eq("id",other).single();if(preference.error||!preference.data.allow_calls)throw Error("Contact is not accepting calls");
       if(calls.has(id)||[...calls.values()].some(c=>[c.caller,c.callee].some(u=>u===userId||u===other)))throw Error("Contact is busy");
-      const call:RelayCall={id,caller:userId,callee:other,callerSocket:socket.id,timer:setTimeout(()=>{const c=calls.get(id);if(c)endCall(c,"No answer");},45000)};
+      const call:RelayCall={id,video,startedAt:new Date().toISOString(),caller:userId,callee:other,callerSocket:socket.id,timer:setTimeout(()=>{const c=calls.get(id);if(c)endCall(c,"No answer");},45000)};
       calls.set(id,call);io.to("user:"+other).emit("call:incoming",{id,conversationId,from:userId,video});ack?.({ok:true});
     }catch(e){ack?.({ok:false,error:(e as Error).message});}
   });
-  socket.on("call:accept",(id:unknown)=>{if(typeof id!=="string")return;const c=calls.get(id);if(!c||c.callee!==userId||c.calleeSocket)return;c.calleeSocket=socket.id;clearTimeout(c.timer);c.timer=setTimeout(()=>endCall(c,"Call time limit reached"),4*60*60*1000);io.to(c.callerSocket).emit("call:accepted",{id});socket.to("user:"+userId).emit("call:ended",{id,reason:"Answered elsewhere"});});
+  socket.on("call:accept",(id:unknown)=>{if(typeof id!=="string")return;const c=calls.get(id);if(!c||c.callee!==userId||c.calleeSocket)return;c.calleeSocket=socket.id;c.acceptedAt=new Date().toISOString();clearTimeout(c.timer);c.timer=setTimeout(()=>endCall(c,"Call time limit reached"),4*60*60*1000);io.to(c.callerSocket).emit("call:accepted",{id});socket.to("user:"+userId).emit("call:ended",{id,reason:"Answered elsewhere"});});
   socket.on("call:signal",(payload:unknown)=>{const parsed=z.object({id:z.string().uuid(),description:z.object({type:z.enum(["offer","answer"]),sdp:z.string().max(60000)}).optional(),candidate:z.object({candidate:z.string().max(4096),sdpMid:z.string().nullable().optional(),sdpMLineIndex:z.number().nullable().optional(),usernameFragment:z.string().nullable().optional()}).optional()}).safeParse(payload);if(!parsed.success)return;const c=calls.get(parsed.data.id);if(!c||!c.calleeSocket)return;const target=socket.id===c.callerSocket?c.calleeSocket:socket.id===c.calleeSocket?c.callerSocket:null;if(target&&limitRate("signal:"+socket.id,300,60000))io.to(target).emit("call:signal",parsed.data);});
   socket.on("call:end",(id:unknown)=>{if(typeof id!=="string")return;const c=calls.get(id);if(c&&(socket.id===c.callerSocket||socket.id===c.calleeSocket||(!c.calleeSocket&&userId===c.callee)))endCall(c,"Call ended");});
   socket.on("disconnect",()=>{for(const c of calls.values())if(c.callerSocket===socket.id||c.calleeSocket===socket.id)endCall(c,"Connection lost");});
