@@ -136,6 +136,7 @@ app.get("/api/friends",guard,safe(async(req,res)=>{
 app.post("/api/friends",guard,safe(async(req,res)=>{
  const id=z.string().uuid().parse(req.body.id);if(id===req.userId){res.status(400).json({error:"Cannot add yourself"});return;}
  if(!limitRate("friend:"+req.userId,30,3600000)){res.status(429).json({error:"Too many requests"});return;}
+ const preference=await admin.from("profiles").select("allow_friend_requests").eq("id",id).single();if(preference.error)throw preference.error;if(!preference.data.allow_friend_requests){res.status(403).json({error:"This user is not accepting friend requests"});return;}
  const {error}=await admin.from("relay_friends").insert({requester:req.userId,recipient:id});if(error&&error.code!=="23505")throw error;
  io.to("user:"+id).emit("friends:changed");res.json({ok:true});
 }));
@@ -154,15 +155,15 @@ app.post("/api/messages/:id/reactions",guard,safe(async(req,res)=>{
  const rows=await admin.from("relay_reactions").select("user_id,emoji").eq("message_id",id);if(rows.error)throw rows.error;io.to("conversation:"+m.conversation_id).emit("reactions:changed",{id,conversationId:m.conversation_id,reactions:rows.data});res.json(rows.data);
 }));
 app.get("/api/me",guard,safe(async(req,res) => {
-  const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at,bio,status").eq("id",req.userId!).maybeSingle();
+  const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at,bio,status,hide_online,allow_calls,allow_friend_requests").eq("id",req.userId!).maybeSingle();
   if (error) throw error;
   if (!data) { res.status(404).json({error:"Profile missing. Run the profile backfill migration in Supabase."}); return; }
   res.json(data);
 }));
 app.patch("/api/me",guard,safe(async(req,res) => {
-  const parsed = z.object({username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional()}).safeParse(req.body);
+  const parsed = z.object({username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional(),hide_online:z.boolean().optional(),allow_calls:z.boolean().optional(),allow_friend_requests:z.boolean().optional()}).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({error:"Username must be 3–24 letters, numbers or underscores."}); return; }
-  const {data,error} = await admin.from("profiles").update({username:parsed.data.username,bio:parsed.data.bio,status:parsed.data.status}).eq("id",req.userId!).select("id,username,bio,status").single();
+  const {data,error} = await admin.from("profiles").update({username:parsed.data.username,bio:parsed.data.bio,status:parsed.data.status,hide_online:parsed.data.hide_online,allow_calls:parsed.data.allow_calls,allow_friend_requests:parsed.data.allow_friend_requests}).eq("id",req.userId!).select("id,username,bio,status").single();
   if (error) {
     if (error.code === "23505") { res.status(409).json({error:"That username is already taken."}); return; }
     throw error;
@@ -190,13 +191,13 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   if (error) throw error;
   const ids = (mine ?? []).map(m => m.conversation_id);
   if (!ids.length) { res.json([]); return; }
-  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path,bio,status)").in("conversation_id",ids);
+  const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path,bio,status,hide_online)").in("conversation_id",ids);
   if (e) throw e;
   const {data:details,error:de}=await admin.from("conversations").select("id,name").in("id",ids);
   if(de)throw de;
   const previews=await Promise.all(ids.map(async id=>{const {data}=await admin.from("messages").select("id,body,created_at,sender_id,attachment_name").eq("conversation_id",id).order("created_at",{ascending:false}).limit(1).maybeSingle();return [id,data] as const;}));
   const latest=new Map(previews);
-  res.json(ids.map(id => ({ id, latest:latest.get(id)??null, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
+  res.json(ids.map(id => ({ id, latest:latest.get(id)??null, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:(!(m.profiles as any)?.hide_online||m.user_id===req.userId)&&io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
   const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional() }).safeParse(req.body);
@@ -305,6 +306,7 @@ io.on("connection",socket => {
       if(error||members?.length!==2)throw Error("Calls require a private chat");
       const other=members.find(m=>m.user_id!==userId)?.user_id;
       if(!other||!io.sockets.adapter.rooms.get("user:"+other)?.size)throw Error("Contact is offline");
+      const preference=await admin.from("profiles").select("allow_calls").eq("id",other).single();if(preference.error||!preference.data.allow_calls)throw Error("Contact is not accepting calls");
       if(calls.has(id)||[...calls.values()].some(c=>[c.caller,c.callee].some(u=>u===userId||u===other)))throw Error("Contact is busy");
       const call:RelayCall={id,caller:userId,callee:other,callerSocket:socket.id,timer:setTimeout(()=>{const c=calls.get(id);if(c)endCall(c,"No answer");},45000)};
       calls.set(id,call);io.to("user:"+other).emit("call:incoming",{id,conversationId,from:userId,video});ack?.({ok:true});
