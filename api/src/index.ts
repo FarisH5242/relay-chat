@@ -289,11 +289,31 @@ io.use(async(socket,next) => {
   try { if (typeof socket.handshake.auth.token !== "string") throw Error(); socket.data.userId = await userFor(socket.handshake.auth.token); next(); }
   catch { next(Error("Unauthorized")); }
 });
+type RelayCall={id:string;caller:string;callee:string;callerSocket:string;calleeSocket?:string;timer:ReturnType<typeof setTimeout>};
+const calls=new Map<string,RelayCall>();
+function endCall(call:RelayCall,reason:string){clearTimeout(call.timer);calls.delete(call.id);io.to("user:"+call.caller).to("user:"+call.callee).emit("call:ended",{id:call.id,reason});}
 io.on("connection",socket => {
   const userId = socket.data.userId as string;
   socket.join("user:"+userId);
   io.emit("presence:changed");
   socket.on("disconnect",()=>io.emit("presence:changed"));
+  socket.on("call:start",async(payload:unknown,ack?: (r:{ok:boolean;error?:string})=>void)=>{
+    try{
+      const {id,conversationId,video}=z.object({id:z.string().uuid(),conversationId:z.string().uuid(),video:z.boolean()}).parse(payload);
+      if(!limitRate("call:"+userId,8,60000)||!(await member(conversationId,userId)))throw Error("Call unavailable");
+      const {data:members,error}=await admin.from("conversation_members").select("user_id").eq("conversation_id",conversationId);
+      if(error||members?.length!==2)throw Error("Calls require a private chat");
+      const other=members.find(m=>m.user_id!==userId)?.user_id;
+      if(!other||!io.sockets.adapter.rooms.get("user:"+other)?.size)throw Error("Contact is offline");
+      if(calls.has(id)||[...calls.values()].some(c=>[c.caller,c.callee].some(u=>u===userId||u===other)))throw Error("Contact is busy");
+      const call:RelayCall={id,caller:userId,callee:other,callerSocket:socket.id,timer:setTimeout(()=>{const c=calls.get(id);if(c)endCall(c,"No answer");},45000)};
+      calls.set(id,call);io.to("user:"+other).emit("call:incoming",{id,conversationId,from:userId,video});ack?.({ok:true});
+    }catch(e){ack?.({ok:false,error:(e as Error).message});}
+  });
+  socket.on("call:accept",(id:unknown)=>{if(typeof id!=="string")return;const c=calls.get(id);if(!c||c.callee!==userId||c.calleeSocket)return;c.calleeSocket=socket.id;clearTimeout(c.timer);c.timer=setTimeout(()=>endCall(c,"Call time limit reached"),4*60*60*1000);io.to(c.callerSocket).emit("call:accepted",{id});socket.to("user:"+userId).emit("call:ended",{id,reason:"Answered elsewhere"});});
+  socket.on("call:signal",(payload:unknown)=>{const parsed=z.object({id:z.string().uuid(),description:z.object({type:z.enum(["offer","answer"]),sdp:z.string().max(60000)}).optional(),candidate:z.object({candidate:z.string().max(4096),sdpMid:z.string().nullable().optional(),sdpMLineIndex:z.number().nullable().optional(),usernameFragment:z.string().nullable().optional()}).optional()}).safeParse(payload);if(!parsed.success)return;const c=calls.get(parsed.data.id);if(!c||!c.calleeSocket)return;const target=socket.id===c.callerSocket?c.calleeSocket:socket.id===c.calleeSocket?c.callerSocket:null;if(target&&limitRate("signal:"+socket.id,300,60000))io.to(target).emit("call:signal",parsed.data);});
+  socket.on("call:end",(id:unknown)=>{if(typeof id!=="string")return;const c=calls.get(id);if(c&&(socket.id===c.callerSocket||socket.id===c.calleeSocket||(!c.calleeSocket&&userId===c.callee)))endCall(c,"Call ended");});
+  socket.on("disconnect",()=>{for(const c of calls.values())if(c.callerSocket===socket.id||c.calleeSocket===socket.id)endCall(c,"Connection lost");});
   socket.on("conversation:join",async(id:unknown,ack?: (result:{ok:boolean})=>void) => {
     try { if (typeof id !== "string" || !(await member(id,userId))) throw Error(); await socket.join("conversation:"+id); ack?.({ok:true}); }
     catch { ack?.({ok:false}); }
