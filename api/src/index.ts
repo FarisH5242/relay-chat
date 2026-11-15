@@ -162,6 +162,14 @@ app.post("/api/messages/:id/reactions",guard,safe(async(req,res)=>{
  const rows=await admin.from("relay_reactions").select("user_id,emoji").eq("message_id",id);if(rows.error)throw rows.error;io.to("conversation:"+m.conversation_id).emit("reactions:changed",{id,conversationId:m.conversation_id,reactions:rows.data});res.json(rows.data);
 }));
 app.get("/api/calls",guard,safe(async(req,res)=>{const {data,error}=await admin.from("relay_call_history").select("id,caller,callee,video,started_at,accepted_at,ended_at,reason,caller_profile:profiles!relay_call_history_caller_fkey(username),callee_profile:profiles!relay_call_history_callee_fkey(username)").or("caller.eq."+req.userId+",callee.eq."+req.userId).order("ended_at",{ascending:false}).limit(100);if(error)throw error;res.json(data??[]);}));
+app.get("/api/me/export",guard,safe(async(req,res)=>{
+ const id=req.userId!;
+ if(!limitRate("export:"+id,3,3600000)){res.status(429).json({error:"Export limit reached"});return;}
+ const queries=await Promise.all([admin.from("profiles").select("*").eq("id",id).single(),admin.from("conversation_members").select("*").eq("user_id",id),admin.from("relay_friends").select("*").or("requester.eq."+id+",recipient.eq."+id),admin.from("relay_blocks").select("*").eq("blocker",id),admin.from("relay_call_history").select("*").or("caller.eq."+id+",callee.eq."+id)]);
+ for(const q of queries)if(q.error)throw q.error;
+ const messages:unknown[]=[];for(let offset=0;;offset+=500){const q=await admin.from("messages").select("*").eq("sender_id",id).order("id").range(offset,offset+499);if(q.error)throw q.error;messages.push(...(q.data??[]));if((q.data??[]).length<500)break;}
+ res.setHeader("Cache-Control","no-store");res.json({exported_at:new Date().toISOString(),profile:queries[0].data,memberships:queries[1].data,friends:queries[2].data,blocks:queries[3].data,calls:queries[4].data,messages});
+}));
 app.get("/api/me",guard,safe(async(req,res) => {
   const {data,error} = await admin.from("profiles").select("id,username,avatar_path,created_at,bio,status,hide_online,allow_calls,allow_friend_requests,read_receipts").eq("id",req.userId!).maybeSingle();
   if (error) throw error;
