@@ -1,0 +1,1 @@
+UPDATE storage.buckets SET allowed_mime_types = ARRAY(SELECT DISTINCT unnest(coalesce(allowed_mime_types,ARRAY[]::text[]) || ARRAY['audio/webm','audio/ogg','audio/mp4'])) WHERE id='relay-files';
