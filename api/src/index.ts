@@ -384,13 +384,14 @@ io.on("connection",socket => {
   socket.on("call:end",(id:unknown)=>{if(typeof id!=="string")return;const c=calls.get(id);if(c&&(socket.id===c.callerSocket||socket.id===c.calleeSocket||(!c.calleeSocket&&userId===c.callee)))endCall(c,"Call ended");});
   socket.on("disconnect",()=>{for(const c of calls.values())if(c.callerSocket===socket.id||c.calleeSocket===socket.id)endCall(c,"Connection lost");});
   socket.on("conversation:join",async(id:unknown,ack?: (result:{ok:boolean})=>void) => {
-    try { if (typeof id !== "string" || !(await member(id,userId))) throw Error(); await socket.join("conversation:"+id); ack?.({ok:true}); }
+    try { if (!z.string().uuid().safeParse(id).success || typeof id !== "string" || !limitRate("join:"+userId,120,60000) || !(await member(id,userId))) throw Error(); await socket.join("conversation:"+id); ack?.({ok:true}); }
     catch { ack?.({ok:false}); }
   });
   socket.on("typing",async(payload:unknown) => {
     const parsed = z.object({conversationId:z.string().uuid(),isTyping:z.boolean()}).safeParse(payload);
     if (!parsed.success) return;
     try {
+      if(!limitRate("typing:"+userId,90,60000))return;
       if (!(await member(parsed.data.conversationId,userId))) return;
       if(!(await canContactConversation(parsed.data.conversationId,userId)))return;
       socket.to("conversation:"+parsed.data.conversationId).emit("typing", {conversationId:parsed.data.conversationId,userId,isTyping:parsed.data.isTyping});
