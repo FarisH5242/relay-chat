@@ -2,7 +2,7 @@ import {Calls} from "./Calls";
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type FormEvent, type ReactNode } from "react";
 import { createClient, type Session } from "@supabase/supabase-js";
 import { io, type Socket } from "socket.io-client";
-import { LogOut, MessageCircle, Plus, Send, Search, Settings2, X, Check, WifiOff, Pencil, Trash2, Paperclip, CheckCheck, ImagePlus, Download, Smile, Copy, ArrowLeft, Users, LockKeyhole, MoreHorizontal, Pin, Mic, Square, Images, Star, Archive, Reply, Forward, Palette } from "lucide-react";
+import { LogOut, MessageCircle, Plus, Send, Search, Settings2, X, Check, WifiOff, Pencil, Trash2, Paperclip, CheckCheck, ImagePlus, Download, Smile, Copy, ArrowLeft, Users, LockKeyhole, MoreHorizontal, Pin, Mic, Square, Images, Star, Archive, Reply, Forward, Palette, Video } from "lucide-react";
 // Accept a Supabase project URL even if a dashboard/API path was pasted by mistake.
 // The auth client adds /auth/v1 itself; including it twice breaks login and signup.
 function resolveSupabaseUrl(value: string | undefined): string {
