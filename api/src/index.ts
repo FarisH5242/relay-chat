@@ -48,7 +48,7 @@ function limitRate(key:string,max:number,windowMs:number):boolean {
   bucket.count++;return true;
 }
 const filePayload=z.object({name:z.string().min(1).max(120),mime:z.string().min(1).max(100),data:z.string().min(1).max(2800000)});
-const allowedMimes=new Set(["image/png","image/jpeg","image/webp","image/gif","application/pdf","text/plain"]);
+const allowedMimes=new Set(["audio/webm","audio/ogg","audio/mp4","image/png","image/jpeg","image/webp","image/gif","application/pdf","text/plain"]);
 async function storeFile(userId:string,kind:"avatars"|"attachments",payload:unknown) {
   const parsed=filePayload.safeParse(payload);
   if(!parsed.success)throw Error("Invalid file");
@@ -56,7 +56,7 @@ async function storeFile(userId:string,kind:"avatars"|"attachments",payload:unkn
   if(!allowedMimes.has(mime))throw Error("Unsupported file type. Use images, PDF or plain text.");
   const bytes=Buffer.from(data,"base64");
   if(!bytes.length||bytes.length>2*1024*1024)throw Error("File must be under 2 MB.");
-  const ext=({ "image/png":"png","image/jpeg":"jpg","image/webp":"webp","image/gif":"gif","application/pdf":"pdf","text/plain":"txt"} as Record<string,string>)[mime];
+  const ext=({ "image/png":"png","image/jpeg":"jpg","image/webp":"webp","image/gif":"gif","application/pdf":"pdf","text/plain":"txt","audio/webm":"webm","audio/ogg":"ogg","audio/mp4":"m4a"} as Record<string,string>)[mime];
   const path=userId+"/"+crypto.randomUUID()+"."+ext;
   const {error}=await admin.storage.from("relay-files").upload(path,bytes,{contentType:mime,upsert:false});
   if(error)throw error;
