@@ -137,6 +137,21 @@ app.patch("/api/me",guard,safe(async(req,res) => {
   io.emit("profiles:updated");
   res.json(data);
 }));
+app.post("/api/groups",guard,safe(async(req,res)=>{
+ const parsed=z.object({name:z.string().trim().min(1).max(60),usernames:z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/)).min(2).max(19)}).parse(req.body);
+ if(!limitRate("group:"+req.userId,10,3600000)){res.status(429).json({error:"Group creation limit reached"});return;}
+ const names=[...new Set(parsed.usernames)];
+ const {data:people,error}=await admin.from("profiles").select("id,username").in("username",names);
+ if(error)throw error;
+ const ids=[...new Set([req.userId!,...(people??[]).map(p=>p.id)])];
+ if(people?.length!==names.length||ids.length<3){res.status(400).json({error:"Enter at least two distinct existing usernames other than your own."});return;}
+ const {data:group,error:ge}=await admin.from("conversations").insert({name:parsed.name}).select("id").single();
+ if(ge)throw ge;
+ const {error:me}=await admin.from("conversation_members").insert(ids.map(id=>({conversation_id:group.id,user_id:id})));
+ if(me){await admin.from("conversations").delete().eq("id",group.id);throw me;}
+ for(const id of ids)io.to("user:"+id).emit("conversations:refresh");
+ res.status(201).json(group);
+}));
 app.get("/api/conversations",guard,safe(async(req,res) => {
   const { data: mine, error } = await admin.from("conversation_members").select("conversation_id").eq("user_id",req.userId!);
   if (error) throw error;
@@ -144,7 +159,9 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   if (!ids.length) { res.json([]); return; }
   const { data: all, error: e } = await admin.from("conversation_members").select("conversation_id,user_id,last_read_at,profiles(username,avatar_path)").in("conversation_id",ids);
   if (e) throw e;
-  res.json(ids.map(id => ({ id, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null })) })));
+  const {data:details,error:de}=await admin.from("conversations").select("id,name").in("id",ids);
+  if(de)throw de;
+  res.json(ids.map(id => ({ id, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null, online:io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
   const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/) }).safeParse(req.body);
@@ -167,7 +184,7 @@ app.post("/api/conversations",guard,safe(async(req,res) => {
     const { data: shared } = await admin.from("conversation_members").select("conversation_id").eq("user_id",target.id).in("conversation_id",ids);
     for (const item of shared ?? []) {
       const { count } = await admin.from("conversation_members").select("*",{count:"exact",head:true}).eq("conversation_id",item.conversation_id);
-      if (count === 2) { res.json({id:item.conversation_id}); return; }
+      if (count === 2) { const {data:existing}=await admin.from("conversations").select("name").eq("id",item.conversation_id).single(); if(existing?.name===null){res.json({id:item.conversation_id});return;} }
     }
   }
   const { data: conversation, error } = await admin.from("conversations").insert({}).select("id").single();
@@ -240,6 +257,8 @@ io.use(async(socket,next) => {
 io.on("connection",socket => {
   const userId = socket.data.userId as string;
   socket.join("user:"+userId);
+  io.emit("presence:changed");
+  socket.on("disconnect",()=>io.emit("presence:changed"));
   socket.on("conversation:join",async(id:unknown,ack?: (result:{ok:boolean})=>void) => {
     try { if (typeof id !== "string" || !(await member(id,userId))) throw Error(); await socket.join("conversation:"+id); ack?.({ok:true}); }
     catch { ack?.({ok:false}); }
