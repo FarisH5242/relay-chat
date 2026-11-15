@@ -168,6 +168,21 @@ app.get("/api/moderation/reports",guard,safe(async(req,res)=>{
  if(!isModerator(req.userId!)){res.status(403).json({error:"Forbidden"});return;}
  const {data,error}=await admin.from("relay_reports").select("id,reporter,reported,reason,created_at").order("created_at",{ascending:false}).limit(100);if(error)throw error;res.setHeader("Cache-Control","no-store");res.json(data??[]);
 }));
+app.post("/api/scheduled",guard,safe(async(req,res)=>{
+ const {conversationId,body,sendAt}=z.object({conversationId:z.string().uuid(),body:z.string().trim().min(1).max(2000),sendAt:z.string().datetime()}).parse(req.body);
+ const delta=Date.parse(sendAt)-Date.now();if(delta<60000||delta>30*86400000){res.status(400).json({error:"Choose a time between one minute and 30 days from now"});return;}
+ if(!await member(conversationId,req.userId!)||!await canContactConversation(conversationId,req.userId!)){res.status(403).json({error:"Contact unavailable"});return;}
+ if(!limitRate("schedule:"+req.userId,20,3600000)){res.status(429).json({error:"Scheduling limit reached"});return;}
+ const {data,error}=await admin.from("relay_scheduled").insert({conversation_id:conversationId,sender_id:req.userId,body,send_at:sendAt}).select("*").single();if(error)throw error;res.json(data);
+}));
+app.get("/api/scheduled",guard,safe(async(req,res)=>{const {data,error}=await admin.from("relay_scheduled").select("*").eq("sender_id",req.userId!).order("send_at",{ascending:false}).limit(100);if(error)throw error;res.json(data??[]);}));
+app.delete("/api/scheduled/:id",guard,safe(async(req,res)=>{const id=z.string().uuid().parse(req.params.id);const {data,error}=await admin.from("relay_scheduled").delete().eq("id",id).eq("sender_id",req.userId!).eq("state","pending").select("id");if(error)throw error;if(!data?.length){res.status(409).json({error:"Message is no longer pending"});return;}res.json({ok:true});}));
+let processingScheduled=false;
+async function processScheduled(){if(processingScheduled)return;processingScheduled=true;try{
+ const {data,error}=await admin.from("relay_scheduled").select("id").eq("state","pending").lte("send_at",new Date().toISOString()).order("send_at").limit(50);if(error)throw error;
+ for(const job of data??[]){const result=await admin.rpc("relay_deliver_scheduled",{p_id:job.id});if(result.error){console.error(result.error.message);continue;}for(const m of result.data??[]){io.to("conversation:"+m.conversation_id).emit("message:new",m);const members=await admin.from("conversation_members").select("user_id").eq("conversation_id",m.conversation_id);for(const u of members.data??[])io.to("user:"+u.user_id).emit("conversation:activity",{conversationId:m.conversation_id,senderId:m.sender_id});}}
+ }catch(e){console.error("Scheduled delivery",e);}finally{processingScheduled=false;}}
+setInterval(()=>void processScheduled(),15000);
 app.get("/api/me/export",guard,safe(async(req,res)=>{
  const id=req.userId!;
  if(!limitRate("export:"+id,3,3600000)){res.status(429).json({error:"Export limit reached"});return;}
