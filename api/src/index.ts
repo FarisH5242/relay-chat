@@ -194,7 +194,9 @@ app.get("/api/conversations",guard,safe(async(req,res) => {
   if (e) throw e;
   const {data:details,error:de}=await admin.from("conversations").select("id,name").in("id",ids);
   if(de)throw de;
-  res.json(ids.map(id => ({ id, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
+  const previews=await Promise.all(ids.map(async id=>{const {data}=await admin.from("messages").select("id,body,created_at,sender_id,attachment_name").eq("conversation_id",id).order("created_at",{ascending:false}).limit(1).maybeSingle();return [id,data] as const;}));
+  const latest=new Map(previews);
+  res.json(ids.map(id => ({ id, latest:latest.get(id)??null, name:details?.find(d=>d.id===id)?.name??null, members:(all ?? []).filter(m => m.conversation_id === id).map(m => ({ id:m.user_id, username:(m.profiles as any)?.username ?? "Unknown", avatar_path:(m.profiles as any)?.avatar_path ?? null, last_read_at:m.last_read_at ?? null, bio:(m.profiles as any)?.bio??"",status:(m.profiles as any)?.status??"",online:io.sockets.adapter.rooms.has("user:"+m.user_id) })) })));
 }));
 app.post("/api/conversations",guard,safe(async(req,res) => {
   const parsed = z.object({ username:z.string().trim().toLowerCase().regex(/^[a-z0-9_]{3,24}$/),bio:z.string().trim().max(180).optional(),status:z.string().trim().max(80).optional() }).safeParse(req.body);
