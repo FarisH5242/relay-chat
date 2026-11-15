@@ -27,3 +27,5 @@
 
 /* Relay 2.1 attachments, profile photos and read states */
 .avatar{overflow:hidden}.avatar img{display:block;width:100%;height:100%;object-fit:cover}.hidden-file{display:none!important}.attachment-button{flex-shrink:0;border:1px solid #494c4e;background:#343638;width:45px;height:45px}.attachment-link{display:inline-flex;align-items:center;gap:9px;max-width:100%;color:#f1f3f3;font-weight:600;text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}.attachment-link:hover{color:white}.read-label{display:flex;justify-content:flex-end;align-items:center;gap:4px;font-size:10px;color:#c7e1d0;margin-top:4px}.avatar-upload{display:inline-flex;align-items:center;justify-content:center;gap:9px;width:100%;margin:-8px 0 25px;padding:11px 12px;border:1px solid #5b5f60;background:#36393a;border-radius:8px;color:#eef0f0;font-size:12px;font-weight:600}.avatar-upload:hover{background:#414546}
+
+.unread-dot{width:9px;height:9px;border-radius:50%;background:#c8dcd0;flex-shrink:0;margin-left:auto}.sender-name{font-size:11px;font-weight:700;color:#c5d4ce;margin-bottom:5px}.new-chat .auth-switch{margin-bottom:15px}
